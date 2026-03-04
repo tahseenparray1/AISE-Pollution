@@ -1,0 +1,30 @@
+# =========================
+# Core deep learning and computing 
+# =========================
+
+torch>=2.0          # PyTorch core (training, autograd, FFTs, GPU/CPU)
+triton             
+numpy               # Multidimensional array handling
+scipy               # Scientific routines, IO
+pandas              # Data handling
+h5py                # HDF5 file support
+netCDF4             # WRF-Chem data handling
+xarray              # Labeled multi-dimensional arrays
+
+
+# =========================
+# Visualization
+# =========================
+
+matplotlib          
+seaborn            
+
+
+# =========================
+# ML utilities
+# =========================
+
+scikit-learn        # Metrics, preprocessing, utilities
+joblib              # Parallel utilities, caching
+tqdm                # Progress bars
+PyYAML              # YAML config system
