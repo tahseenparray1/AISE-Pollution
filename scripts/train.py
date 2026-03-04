@@ -20,7 +20,7 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 # Calculate total features (V) based on your config
-V = len(cfg.features.met_variables_raw) + len(cfg.features.emission_variables_raw)
+V = len(cfg.features.met_variables) + len(cfg.features.emission_variables)
 S1, S2 = 140, 124 # Latitude and Longitude dimensions
 
 # ==========================================
