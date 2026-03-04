@@ -150,34 +150,45 @@ def process_month(month_name):
 # 4. MAIN EXECUTION
 # ==========================================
 
-# Create directories for the output if they don't exist
 os.makedirs(cfg.paths.train_savepath, exist_ok=True)
 os.makedirs(cfg.paths.val_savepath, exist_ok=True)
 
-all_train = []
-all_val = []
-
-print("\nStep 2/3: Windowing and Splitting Data...")
+# Instead of one giant list, we process and save month-by-month
 for month in tqdm(cfg.data.months, desc="Processing months"):
+    # 1. Process one month at a time
     t_m, v_m = process_month(month)
-    all_train.append(t_m)
-    all_val.append(v_m)
+    
+    # 2. Save this month's windows to a temporary file immediately
+    np.save(f"temp_train_{month}.npy", t_m)
+    np.save(f"temp_val_{month}.npy", v_m)
+    
+    # 3. CRITICAL: Delete the large arrays and force Python to clear RAM
+    del t_m, v_m
+    import gc
+    gc.collect() 
 
-# np.concatenate combines April, July, Oct, and Dec into one giant array.
-final_train = np.concatenate(all_train, axis=0)
-final_val = np.concatenate(all_val, axis=0)
+print("\nStep 3/3: Merging Monthly Chunks...")
 
-# We shuffle the TRAINING data so the model doesn't learn based on the 
-# order of the months. We do NOT shuffle the validation data (it stays sequential).
-np.random.seed(cfg.data.seed)
-final_train = final_train[np.random.permutation(len(final_train))]
+# Now we merge the temporary files into the final master files
+def merge_temp_files(prefix, save_path, shuffle=False):
+    chunks = []
+    for month in cfg.data.months:
+        chunks.append(np.load(f"temp_{prefix}_{month}.npy"))
+    
+    final_data = np.concatenate(chunks, axis=0)
+    
+    if shuffle:
+        np.random.seed(cfg.data.seed)
+        final_data = final_data[np.random.permutation(len(final_data))]
+        
+    np.save(save_path, final_data)
+    
+    # Clean up the temporary files
+    for month in cfg.data.months:
+        os.remove(f"temp_{prefix}_{month}.npy")
 
-print(f"\nStep 3/3: Saving Datasets...")
-print(f"Final Train Shape: {final_train.shape}") # (Total Samples, 26(hours), 140, 124, 16(features))
-print(f"Final Val Shape:   {final_val.shape}")
+# Execute the merge
+merge_temp_files("train", os.path.join(cfg.paths.train_savepath, "train_data.npy"), shuffle=True)
+merge_temp_files("val", os.path.join(cfg.paths.val_savepath, "val_data.npy"), shuffle=False)
 
-# Save the unified files. These are much faster to read than 16 separate files.
-np.save(os.path.join(cfg.paths.train_savepath, "train_data.npy"), final_train)
-np.save(os.path.join(cfg.paths.val_savepath, "val_data.npy"), final_val)
-
-print("\nSuccess: Dataset fixed and saved.")
+print("\nSuccess: Dataset saved using incremental RAM management.")
