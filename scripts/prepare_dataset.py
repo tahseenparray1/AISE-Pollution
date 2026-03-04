@@ -105,9 +105,9 @@ print(f"Val Save path: {cfg.paths.val_savepath}")
 print(f"Horizon={cfg.data.horizon}, Stride={cfg.data.stride}")
 print(f"==============================\n")
 
-for feat in all_features:
+for feat in all_features[0:1]:
 
-    print("\n===================================")
+    print("\n===================================testing 1 2 3 ")
     print("Processing feature:", feat)
     print("===================================\n")
 
