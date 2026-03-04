@@ -56,47 +56,38 @@ savepath_val   = cfg.paths.savepath_val
 # =========================================================
 
 class DataLoaders(torch.utils.data.Dataset):
-
     def __init__(self, split, savepath_train, savepath_val):
-
-        self.time_input = cfg.data.time_input
-        self.time_out   = cfg.data.time_out
-        self.T = self.time_input + self.time_out
-
-        self.S1 = cfg.data.S1
-        self.S2 = cfg.data.S2
-        self.all_features = all_features
-
-        if split == "train":
-
-            base_path = savepath_train
-        elif split == "val":
-            base_path = savepath_val
-        else:
-            raise ValueError
-
-        self.arrs = {
-            feat: np.load(os.path.join(base_path, f"{split}_{feat}.npy"), mmap_mode="r")
-            for feat in self.all_features
-        }
-
-        self.N = self.arrs[self.all_features[0]].shape[0]
+        # We determine which single file to open based on the split
+        base_path = savepath_train if split == "train" else savepath_val
+        file_name = "train_data.npy" if split == "train" else "val_data.npy"
+        
+        # We load the data using mmap_mode='r'. 
+        # This keeps the huge file on disk and only pulls the specific 
+        # batch we need into RAM at the moment we need it.
+        self.data = np.load(os.path.join(base_path, file_name), mmap_mode="r")
+        
+        # cfg data for slicing
+        self.time_input = cfg.data.time_input # 10 hours
+        self.time_out = cfg.data.time_out     # 16 hours
+        self.T = self.time_input + self.time_out # 26 total
 
     def __len__(self):
-        return self.N
+        return self.data.shape[0]
 
     def __getitem__(self, idx):
-
-        X = np.empty((self.T, self.S1, self.S2, len(self.all_features)), dtype=np.float32)
-
-        for i, f in enumerate(self.all_features):
-            X[..., i] = self.arrs[f][idx, :self.T]
-
-        x = torch.from_numpy(X[:self.time_input])
-        y = torch.from_numpy(X[self.time_input:, ..., 0]).permute(1, 2, 0)
+        # 1. Grab the 26-hour window for all features at this index
+        # Shape: (26, 140, 124, 16)
+        window = self.data[idx] 
+        
+        # 2. Split into Input (X) and Target (Y)
+        # X gets the first 10 hours and ALL 16 features
+        x = torch.from_numpy(window[:self.time_input]).float()
+        
+        # Y gets the remaining 16 hours, but ONLY the first feature (cpm25)
+        # We permute to (Lat, Lon, Time) to match what FNO expects
+        y = torch.from_numpy(window[self.time_input:, ..., 0]).permute(1, 2, 0).float()
 
         return x, y
-
 
 train_dataset = DataLoaders("train", savepath_train, savepath_val)
 test_dataset  = DataLoaders("val",   savepath_train, savepath_val)
