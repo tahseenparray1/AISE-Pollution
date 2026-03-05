@@ -21,17 +21,19 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # -----------------------
-# Load Custom Min-Max Stats 
-# (Overriding the broken .mat file from the config)
+# Load Grid-Wise Robust Stats 
 # -----------------------
-print("Loading custom normalization stats...")
-stats = np.load('/kaggle/working/actual_min_max_stats.npy', allow_pickle=True).item()
+print("Loading grid-wise normalization stats...")
+stats = np.load('/kaggle/working/grid_robust_stats.npy', allow_pickle=True).item()
 
-pm_min = stats['cpm25']['min']
-pm_den = stats['cpm25']['range']
+# Extract target (cpm25) stats and reshape for broadcasting over (batch, S1, S2, time_out)
+# Original shape is (140, 124), target shape needs to be (1, 140, 124, 1)
+pm_median = stats['cpm25']['median'].reshape(1, cfg.data.S1, cfg.data.S2, 1)
+pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg.data.S1, cfg.data.S2, 1)
 
 def denorm(x):
-    return (x * pm_den) + pm_min
+    """ Inverse the robust scaling: X_raw = (X_scaled * IQR) + Median """
+    return (x * pm_iqr) + pm_median
 
 # ==========================================
 # 2. DATA LOADER
@@ -67,20 +69,15 @@ class TestDataLoader(torch.utils.data.Dataset):
 
         for c, feat in enumerate(self.all_features):
             # Grab the 10 hours for this specific sample and feature
+            # Shape is (10, 140, 124)
             arr = np.array(self.arrs[feat][idx, :self.time_in], dtype=np.float32)
             
-            # --- Normalize ---
-            f_min = self.stats[feat]['min']
-            f_den = self.stats[feat]['range']
+            # --- Grid-wise Normalize ---
+            # numpy automatically broadcasts the (140, 124) stats against the (10, 140, 124) array
+            f_median = self.stats[feat]['median']
+            f_iqr = self.stats[feat]['iqr']
             
-            if feat in ["u10", "v10"]:
-                arr = (2.0 * (arr - f_min) / f_den) - 1.0
-            else:
-                arr = (arr - f_min) / f_den
-                
-            if feat in self.emi_variables:
-                arr = np.clip(arr, 0.0, 1.0)
-                
+            arr = (arr - f_median) / f_iqr
             x[..., c] = arr
 
         return torch.from_numpy(x)
@@ -95,8 +92,6 @@ test_loader = torch.utils.data.DataLoader(
     num_workers=4,
     pin_memory=True
 )
-
-
 
 # ==========================================
 # 3. MODEL INITIALIZATION
@@ -124,7 +119,6 @@ if not os.path.exists(checkpoint_path):
         print(f"Found alternative: Loading latest weights from {checkpoint_path}")
     else:
         raise FileNotFoundError(f"No .pt files found in {checkpoint_dir}. Did training save anything?")
-
 
 checkpoint = torch.load(checkpoint_path, map_location=device)
 

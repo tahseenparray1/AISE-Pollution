@@ -10,43 +10,73 @@ cfg = load_config("configs/prepare_dataset.yaml")
 RAW_PATH = cfg.paths.raw_path
 all_features = cfg.features.met_variables_raw + cfg.features.emission_variables_raw
 
-# Global Stats Scanner (Fixes the min-max problem)
-def compute_actual_stats(features, months):
-    print("Step 1: Calculating Global Statistics...")
+# ==========================================
+# 2. GRID-WISE ROBUST STATS CALCULATOR
+# ==========================================
+def compute_gridwise_robust_stats(features, months):
+    print("Step 1: Calculating Grid-Wise Robust Statistics (Median & IQR)...")
     stats = {}
+    
     for feat in tqdm(features, desc="Scanning features"):
-        feat_min, feat_max = float('inf'), float('-inf')
+        feat_data = []
+        
+        # Load all available temporal data for this feature across the 4 months
         for month in months:
             path = os.path.join(RAW_PATH, month, f"{feat}.npy")
             if os.path.exists(path):
-                data = np.load(path, mmap_mode='r')
-                feat_min = min(feat_min, np.min(data))
-                feat_max = max(feat_max, np.max(data))
-        stats[feat] = {'min': feat_min, 'max': feat_max, 'range': (feat_max - feat_min) + 1e-9}
-    np.save('/kaggle/working/actual_min_max_stats.npy', stats)
+                # Shape: (Hours, 140, 124)
+                data = np.load(path).astype(np.float32) 
+                feat_data.append(data)
+                
+        if not feat_data:
+            print(f"Warning: No data found for feature {feat}")
+            continue
+            
+        # Concatenate along the time axis -> (Total_Hours, 140, 124)
+        feat_data = np.concatenate(feat_data, axis=0)
+        
+        # Calculate Grid-wise Median and IQR along the time axis (axis=0)
+        # Resulting shapes will be exactly (140, 124)
+        median = np.median(feat_data, axis=0)
+        q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
+        iqr = q75 - q25
+        
+        # Prevent division by zero for pixels with constant values (e.g., oceans)
+        iqr[iqr == 0] = 1e-8
+        
+        stats[feat] = {
+            'median': median.astype(np.float32),
+            'iqr': iqr.astype(np.float32)
+        }
+        
+    # Save the new 2D spatial stats dictionary
+    np.save('/kaggle/working/grid_robust_stats.npy', stats)
     return stats
 
-global_stats = compute_actual_stats(all_features, cfg.data.months)
+# Generate our spatial stats
+global_stats = compute_gridwise_robust_stats(all_features, cfg.data.months)
 
 # ==========================================
-# 2. HELPER FUNCTIONS
+# 3. HELPER FUNCTIONS
 # ==========================================
 def process_month(month_name):
-    """ Loads, scales, and stacks ONE month. No windowing! """
+    """ Loads, scales, and stacks ONE month using grid-wise IQR. """
     month_data = []
     
     for feat in all_features:
         path = os.path.join(RAW_PATH, month_name, f"{feat}.npy")
-        arr = np.load(path).astype(np.float32)
+        arr = np.load(path).astype(np.float32) # Shape: (Hours, 140, 124)
         
-        # Scaling
-        arr = (arr - global_stats[feat]['min']) / global_stats[feat]['range']
-        if feat in ["u10", "v10"]: arr = 2.0 * arr - 1.0
-        if feat in cfg.features.emission_variables_raw: arr = np.clip(arr, 0, 1)
+        # Retrieve the (140, 124) spatial stats
+        median = global_stats[feat]['median']
+        iqr = global_stats[feat]['iqr']
+        
+        # Grid-wise Scaling (numpy automatically broadcasts the 2D stats across the temporal dimension)
+        arr = (arr - median) / iqr
         
         month_data.append(arr)
         
-    # Stack into 4D array: (Hours, 140, 124, 16)
+    # Stack into 4D array: (Hours, 140, 124, 16_features)
     combined = np.stack(month_data, axis=-1)
     
     # Chronological Split (No leakage)
@@ -57,7 +87,7 @@ def process_month(month_name):
     return train_raw, val_raw
 
 # ==========================================
-# 3. MAIN EXECUTION
+# 4. MAIN EXECUTION
 # ==========================================
 os.makedirs(cfg.paths.train_savepath, exist_ok=True)
 os.makedirs(cfg.paths.val_savepath, exist_ok=True)
@@ -71,8 +101,7 @@ for month in tqdm(cfg.data.months):
     all_val.append(v_m)
 
 print("\nStep 3: Merging Final Sequences...")
-# Combine the 4D blocks. 
-# Shape will be: (Total_Train_Hours, 140, 124, 16)
+# Combine the 4D blocks -> Shape: (Total_Train_Hours, 140, 124, 16)
 final_train = np.concatenate(all_train, axis=0)
 final_val = np.concatenate(all_val, axis=0)
 
