@@ -41,4 +41,4 @@ training:
   weight_decay: 1e-4
   scheduler_step: 18
   scheduler_gamma: 0.5
-  checkpoint_every: 5
+  checkpoint_every: 20
