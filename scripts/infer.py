@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 import warnings
-
+import glob
 from models.baseline_model import FNO2D
 from src.utils.config import load_config
 
@@ -111,7 +111,23 @@ model = FNO2D(
 ).to(device)
 
 print(f"Loading weights from: {cfg.paths.checkpoint}")
-checkpoint = torch.load(cfg.paths.checkpoint, map_location=device)
+
+checkpoint_path = cfg.paths.checkpoint
+
+if not os.path.exists(checkpoint_path):
+    print(f"Warning: Specific checkpoint {checkpoint_path} not found.")
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    available_ckpts = glob.glob(os.path.join(checkpoint_dir, "*.pt"))
+    
+    if available_ckpts:
+        checkpoint_path = max(available_ckpts, key=os.path.getmtime)
+        print(f"Found alternative: Loading latest weights from {checkpoint_path}")
+    else:
+        raise FileNotFoundError(f"No .pt files found in {checkpoint_dir}. Did training save anything?")
+
+
+checkpoint = torch.load(checkpoint_path, map_location=device)
+
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval() # Switch to evaluation mode
 
