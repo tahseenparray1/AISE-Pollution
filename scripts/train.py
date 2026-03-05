@@ -40,7 +40,7 @@ class DataLoaders(torch.utils.data.Dataset):
         self.stride = getattr(cfg.data, 'stride', 1) 
         
         # Calculate total valid windows
-        self.n_samples = ((self.data.shape[0] - self.window_size) // self.stride + 1)//10
+        self.n_samples = (self.data.shape[0] - self.window_size) // self.stride + 1
 
     def __len__(self):
         # PyTorch needs this to know how many batches to make
