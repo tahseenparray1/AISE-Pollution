@@ -41,8 +41,9 @@ def compute_gridwise_robust_stats(features, months):
         q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
         iqr = q75 - q25
         
-        # Prevent division by zero for pixels with constant values (e.g., oceans)
-        iqr[iqr == 0] = 1e-8
+        # FIX: Prevent exploding values for sparse features (like rain). 
+        # If the IQR is near zero, set it to 1.0 to avoid scaling up rare events to infinity.
+        iqr = np.where(iqr < 1e-3, 1.0, iqr)
         
         stats[feat] = {
             'median': median.astype(np.float32),

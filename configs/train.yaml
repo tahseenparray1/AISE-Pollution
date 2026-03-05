@@ -36,9 +36,9 @@ model:
 
 training:
   batch_size: 6
-  epochs: 99
+  epochs: 3 #99
   lr: 2e-3
   weight_decay: 1e-4
   scheduler_step: 18
   scheduler_gamma: 0.5
-  checkpoint_every: 20
+  checkpoint_every: 1 #20
