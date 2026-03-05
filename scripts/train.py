@@ -27,21 +27,41 @@ S1, S2 = cfg.data.S1, cfg.data.S2 # Pulling grid size directly from config
 # ==========================================
 class DataLoaders(torch.utils.data.Dataset):
     def __init__(self, split, savepath_train, savepath_val):
+        # Determine paths based on split
         base_path = savepath_train if split == "train" else savepath_val
         file_name = "train_data.npy" if split == "train" else "val_data.npy"
         
+        # Load lazily using mmap_mode
         self.data = np.load(os.path.join(base_path, file_name), mmap_mode="r")
         
+        # Setup dimensions and sliding window logic
         self.time_in = cfg.data.time_input 
         self.time_out = cfg.data.time_out   
         self.window_size = self.time_in + self.time_out 
-        
-        # FIXED: Safely get stride, defaulting to 1 if it's missing from YAML
         self.stride = getattr(cfg.data, 'stride', 1) 
         
+        # Calculate total valid windows
         self.n_samples = (self.data.shape[0] - self.window_size) // self.stride + 1
 
-# ... (Rest of DataLoader __len__ and __getitem__ stays exactly the same) ...
+    def __len__(self):
+        # PyTorch needs this to know how many batches to make
+        return self.n_samples
+
+    def __getitem__(self, idx):
+        # PyTorch uses this to grab a specific window
+        start_idx = idx * self.stride
+        end_idx = start_idx + self.window_size
+        
+        # Slice the window from the SSD
+        window = self.data[start_idx:end_idx].astype(np.float32)
+        
+        # Split into Input (10 hours, all features)
+        x = torch.from_numpy(window[:self.time_in])
+        
+        # Split into Target (16 hours, PM2.5 only, reshaped to Lat/Lon/Time)
+        y = torch.from_numpy(window[self.time_in:, ..., 0]).permute(1, 2, 0)
+        
+        return x, y
 
 # FIXED: Pass the exact path names from your YAML
 train_dataset = DataLoaders("train", cfg.paths.savepath_train, cfg.paths.savepath_val)
