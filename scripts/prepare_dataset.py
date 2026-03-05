@@ -23,7 +23,7 @@ def compute_actual_stats(features, months):
                 feat_min = min(feat_min, np.min(data))
                 feat_max = max(feat_max, np.max(data))
         stats[feat] = {'min': feat_min, 'max': feat_max, 'range': (feat_max - feat_min) + 1e-9}
-    np.save('actual_min_max_stats.npy', stats)
+    np.save('/kaggle/working/actual_min_max_stats.npy', stats)
     return stats
 
 global_stats = compute_actual_stats(all_features, cfg.data.months)
