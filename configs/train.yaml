@@ -8,7 +8,6 @@ paths:
   save_dir: /kaggle/working/experiments/baseline/logs/log.json
   model_save_path: /kaggle/working/experiments/baseline/checkpoints/fno_baseline.pt
 
-
 data:
   ntrain: 2112
   ntest: 528
@@ -20,15 +19,16 @@ data:
 
 features:
   V: 16
-  met_variables: ['cpm25','q2','t2','u10','swdown','pblh','v10','psfc','rain']
+  met_variables:
+    ["cpm25", "q2", "t2", "u10", "swdown", "pblh", "v10", "psfc", "rain"]
   emission_variables:
-    - 'PM25'
-    - 'NH3'
-    - 'SO2'
-    - 'NOx'
-    - 'NMVOC_e'
-    - 'NMVOC_finn'
-    - 'bio'
+    - "PM25"
+    - "NH3"
+    - "SO2"
+    - "NOx"
+    - "NMVOC_e"
+    - "NMVOC_finn"
+    - "bio"
 
 model:
   modes: 12
@@ -36,9 +36,9 @@ model:
 
 training:
   batch_size: 6
-  epochs: 100
+  epochs: 5
   lr: 2e-3
   weight_decay: 1e-4
   scheduler_step: 18
   scheduler_gamma: 0.5
-  checkpoint_every: 20
+  checkpoint_every: 5

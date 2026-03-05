@@ -18,7 +18,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(0)
 np.random.seed(0)
 
-# FIXED: Removed the "_raw" suffix to match your YAML
 V = len(cfg.features.met_variables) + len(cfg.features.emission_variables)
 S1, S2 = cfg.data.S1, cfg.data.S2 # Pulling grid size directly from config
 
@@ -41,7 +40,7 @@ class DataLoaders(torch.utils.data.Dataset):
         self.stride = getattr(cfg.data, 'stride', 1) 
         
         # Calculate total valid windows
-        self.n_samples = (self.data.shape[0] - self.window_size) // self.stride + 1
+        self.n_samples = ((self.data.shape[0] - self.window_size) // self.stride + 1)//10
 
     def __len__(self):
         # PyTorch needs this to know how many batches to make
