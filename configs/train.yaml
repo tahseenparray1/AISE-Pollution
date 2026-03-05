@@ -31,14 +31,14 @@ features:
     - "bio"
 
 model:
-  modes: 12
-  width: 32
+  modes: 24
+  width: 64
 
 training:
   batch_size: 6
-  epochs: 3 #99
-  lr: 2e-3
+  epochs: 40
+  lr: 1e-3
   weight_decay: 1e-4
-  scheduler_step: 18
+  scheduler_step: 30
   scheduler_gamma: 0.5
-  checkpoint_every: 1 #20
+  checkpoint_every: 10

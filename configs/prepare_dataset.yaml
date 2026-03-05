@@ -5,7 +5,7 @@ paths:
   min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
 
 data:
-  months: ["APRIL_16"] # ["APRIL_16",'JULY_16','OCT_16','DEC_16']
+  months: ["APRIL_16", "JULY_16", "OCT_16", "DEC_16"]
   horizon: 26
   stride: 1
   val_frac: 0.2
