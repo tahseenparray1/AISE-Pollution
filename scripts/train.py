@@ -14,66 +14,36 @@ from src.utils.config import load_config
 # ==========================================
 cfg = load_config("configs/train.yaml")
 
-# Set up the GPU and ensure reproducibility
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(0)
 np.random.seed(0)
 
-# FIX: Use keys from train.yaml (removed '_raw')
+# FIXED: Removed the "_raw" suffix to match your YAML
 V = len(cfg.features.met_variables) + len(cfg.features.emission_variables)
-S1, S2 = cfg.data.S1, cfg.data.S2 # Latitude and Longitude dimensions
+S1, S2 = cfg.data.S1, cfg.data.S2 # Pulling grid size directly from config
 
 # ==========================================
-# 2. THE DATALOADER (On-the-Fly Windowing)
+# 2. THE DATALOADER 
 # ==========================================
 class DataLoaders(torch.utils.data.Dataset):
-    """
-    Reads the continuous timeline from the SSD and creates overlapping
-    26-hour windows instantly without wasting RAM.
-    """
     def __init__(self, split, savepath_train, savepath_val):
-        # Determine path based on split
         base_path = savepath_train if split == "train" else savepath_val
+        file_name = "train_data.npy" if split == "train" else "val_data.npy"
         
-        # Load features based on the list in train.yaml
-        self.met_vars = cfg.features.met_variables
-        self.emi_vars = cfg.features.emission_variables
-        self.all_features = self.met_vars + self.emi_vars
+        self.data = np.load(os.path.join(base_path, file_name), mmap_mode="r")
         
-        # FIX: Ensure we load files correctly from the base_path
-        self.arrs = {
-            feat: np.load(os.path.join(base_path, f"{split}_{feat}.npy"), mmap_mode="r")
-            for feat in self.all_features
-        }
+        self.time_in = cfg.data.time_input 
+        self.time_out = cfg.data.time_out   
+        self.window_size = self.time_in + self.time_out 
         
-        self.time_in = cfg.data.time_input  # 10 hours
-        self.time_out = cfg.data.time_out   # 16 hours
-        self.T = self.time_in + self.time_out # 26 hours total
+        # FIXED: Safely get stride, defaulting to 1 if it's missing from YAML
+        self.stride = getattr(cfg.data, 'stride', 1) 
         
-        # Use the first feature to determine total available time steps
-        self.N = self.arrs[self.all_features[0]].shape[0]
+        self.n_samples = (self.data.shape[0] - self.window_size) // self.stride + 1
 
-    def __len__(self):
-        return self.N
+# ... (Rest of DataLoader __len__ and __getitem__ stays exactly the same) ...
 
-    def __getitem__(self, idx):
-        # Initialize an empty array for the sample: (Time, Lat, Lon, Features)
-        X_full = np.empty((self.T, S1, S2, len(self.all_features)), dtype=np.float32)
-
-        # Fill the array with data for each feature
-        for i, f in enumerate(self.all_features):
-            X_full[..., i] = self.arrs[f][idx, :self.T]
-
-        # Split into Input (X) and Target (Y)
-        # x: First 10 hours, all features
-        x = torch.from_numpy(X_full[:self.time_in])
-        
-        # y: Remaining 16 hours, only PM2.5 (index 0), permuted to (Lat, Lon, Time)
-        y = torch.from_numpy(X_full[self.time_in:, ..., 0]).permute(1, 2, 0)
-        
-        return x, y
-
-# Initialize Datasets and Loaders
+# FIXED: Pass the exact path names from your YAML
 train_dataset = DataLoaders("train", cfg.paths.savepath_train, cfg.paths.savepath_val)
 test_dataset  = DataLoaders("val",   cfg.paths.savepath_train, cfg.paths.savepath_val)
 
