@@ -25,7 +25,7 @@ print(f"Using device: {device}")
 # (Overriding the broken .mat file from the config)
 # -----------------------
 print("Loading custom normalization stats...")
-stats = np.load('actual_min_max_stats.npy', allow_pickle=True).item()
+stats = np.load('/kaggle/working/actual_min_max_stats.npy', allow_pickle=True).item()
 
 pm_min = stats['cpm25']['min']
 pm_den = stats['cpm25']['range']
