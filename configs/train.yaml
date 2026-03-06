@@ -35,10 +35,10 @@ model:
   width: 128
 
 training:
-  batch_size: 4
-  epochs: 3
+  batch_size: 6
+  epochs: 30
   lr: 1e-3
   weight_decay: 1e-4
   scheduler_step: 30
   scheduler_gamma: 0.5
-  checkpoint_every: 3
+  checkpoint_every: 10

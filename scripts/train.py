@@ -22,9 +22,9 @@ V = len(cfg.features.met_variables) + len(cfg.features.emission_variables)
 S1, S2 = cfg.data.S1, cfg.data.S2
 
 # ==========================================
-# 2. LOAD SPATIAL STATS FOR TRUE RMSE
+# 2. LOSS FUNCTIONS & METRICS
 # ==========================================
-print("Loading grid-wise normalization stats for true RMSE loss...")
+print("Loading grid-wise normalization stats for true RMSE tracking...")
 stats = np.load('/kaggle/working/grid_robust_stats.npy', allow_pickle=True).item()
 
 # Extract the IQR for the target variable (cpm25)
@@ -33,8 +33,8 @@ pm_iqr_tensor = torch.tensor(pm_iqr_np, dtype=torch.float32).to(device)
 
 class ExactRMSELoss(nn.Module):
     """ 
-    Calculates the exact Average Domain RMSE in the original physical space (ug/m3)
-    by scaling the error residuals by the grid-wise IQR. 
+    Calculates the exact Average Domain RMSE in the original physical space (ug/m3).
+    Used ONLY for logging and validation to avoid the gradient trap!
     """
     def __init__(self, iqr_tensor, eps=1e-8):
         super().__init__()
@@ -46,7 +46,10 @@ class ExactRMSELoss(nn.Module):
         mse = torch.mean(real_diff ** 2)
         return torch.sqrt(mse + self.eps)
 
-myloss = ExactRMSELoss(pm_iqr_tensor)
+# Use standard MSE for fair gradients across all spatial grids
+train_loss_fn = nn.MSELoss() 
+# Use ExactRMSE purely to track Kaggle performance
+metric_loss = ExactRMSELoss(pm_iqr_tensor)
 
 # ==========================================
 # 3. FAST IN-MEMORY DATALOADER 
@@ -57,21 +60,17 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         file_name = "train_data.npy" if split == "train" else "val_data.npy"
         file_path = os.path.join(base_path, file_name)
         
-        print(f"[{split.upper()}] Loading entire dataset into RAM from {file_path}...")
-        
-        # 1. Load fully into RAM (no mmap_mode="r"). This avoids slow Kaggle SSD random reads.
+        print(f"[{split.upper()}] Loading dataset into RAM from {file_path}...")
         raw_data = np.load(file_path).astype(np.float32)
-        
-        # 2. Convert to PyTorch Tensor immediately. 
-        # This allows num_workers to read from Shared Memory without RAM duplication!
         self.data = torch.from_numpy(raw_data)
         
         ram_usage = (self.data.element_size() * self.data.nelement()) / (1024 ** 3)
-        print(f"[{split.upper()}] Loaded into Shared Memory: {self.data.shape} ({ram_usage:.2f} GB)")
+        print(f"[{split.upper()}] Shared Memory Footprint: {self.data.shape} ({ram_usage:.2f} GB)")
         
         self.time_in = cfg.data.time_input 
         self.time_out = cfg.data.time_out   
-        self.window_size = self.time_in + self.time_out 
+        self.total_time = cfg.data.total_time
+        self.window_size = getattr(cfg.data, 'horizon', 26) 
         self.stride = getattr(cfg.data, 'stride', 1) 
         
         self.n_samples = (self.data.shape[0] - self.window_size) // self.stride + 1
@@ -83,23 +82,23 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         start_idx = idx * self.stride
         end_idx = start_idx + self.window_size
         
-        # 1. Slice the full 26-hour window
-        window = self.data[start_idx:end_idx] # Shape: (26, 140, 124, 16)
+        # 1. Slice the full 26-hour window: (26, 140, 124, 16)
+        window = self.data[start_idx:end_idx]
         
         # 2. Historical PM2.5 (First 10 hours, Feature Index 0)
-        pm25_hist = window[:self.time_in, ..., 0]   # Shape: (10, 140, 124)
-        pm25_hist = pm25_hist.permute(1, 2, 0)      # Shape: (140, 124, 10)
+        pm25_hist = window[:self.time_in, ..., 0]   
+        pm25_hist = pm25_hist.permute(1, 2, 0)      # (140, 124, 10)
         
         # 3. Full Weather & Emissions (All 26 hours, Feature Indices 1 to 15)
-        other_feats = window[:, ..., 1:]            # Shape: (26, 140, 124, 15)
-        # Flatten the 26 hours and 15 features into a single dimension of 390
-        other_feats = other_feats.permute(1, 2, 0, 3).reshape(140, 124, -1) # Shape: (140, 124, 390)
+        other_feats = window[:, ..., 1:]            # (26, 140, 124, 15)
+        # Flatten into (140, 124, 390)
+        other_feats = other_feats.permute(1, 2, 0, 3).reshape(140, 124, -1) 
         
         # 4. Stack them together into 400 channels
-        x = torch.cat((pm25_hist, other_feats), dim=-1) # Shape: (140, 124, 400)
+        x = torch.cat((pm25_hist, other_feats), dim=-1) # (140, 124, 400)
         
         # 5. Target is the future 16 hours of PM2.5 (Index 0)
-        y = window[self.time_in:, ..., 0].permute(1, 2, 0) # Shape: (140, 124, 16)
+        y = window[self.time_in:, ..., 0].permute(1, 2, 0) # (140, 124, 16)
         
         return x, y
 
@@ -108,37 +107,28 @@ test_dataset  = FastInMemoryDataset("val",   cfg.paths.savepath_train, cfg.paths
 
 batch_size = cfg.training.batch_size 
 
-# Dataloader is now CPU-bound instead of I/O bound.
 train_loader = torch.utils.data.DataLoader(
-    train_dataset, 
-    batch_size=batch_size, 
-    shuffle=True, 
-    num_workers=4, 
-    pin_memory=True,
-    persistent_workers=True 
+    train_dataset, batch_size=batch_size, shuffle=True, 
+    num_workers=4, pin_memory=True, persistent_workers=True 
 )
 
 test_loader = torch.utils.data.DataLoader(
-    test_dataset, 
-    batch_size=batch_size, 
-    shuffle=False, 
-    num_workers=4, 
-    pin_memory=True,
-    persistent_workers=True
+    test_dataset, batch_size=batch_size, shuffle=False, 
+    num_workers=4, pin_memory=True, persistent_workers=True
 )
 
 # ==========================================
 # 4. MODEL & OPTIMIZER
 # ==========================================
-print(f"Building FNO2D with {V} features...")
-
+# Calculate exact input channels dynamically (10 PM2.5 + 15 features * 26 hours = 400)
 in_channels = cfg.data.time_input + (V - 1) * cfg.data.total_time 
 
+print(f"Building FNO2D with {in_channels} input channels...")
 model = FNO2D(
     in_channels=in_channels,
     time_out=cfg.data.time_out,
     width=cfg.model.width,
-    modes=cfg.model.modes,
+    modes=cfg.model.modes, 
 ).to(device)
 
 optimizer = Adam(
@@ -161,15 +151,18 @@ os.makedirs(os.path.dirname(cfg.paths.model_save_path), exist_ok=True)
 # ==========================================
 epochs = cfg.training.epochs 
 log = []
-best_val_rmse = float('inf') # Track the best score
-patience = 4                # Stop if no improvement for 10 epochs
+
+# Early stopping trackers
+best_val_rmse = float('inf') 
+patience = 10                
 epochs_without_improvement = 0
 
 print("\nStarting Training...")
 for ep in range(epochs):
     model.train()
     t_epoch_start = time.time()
-    train_rmse = 0.0
+    
+    train_rmse_metric = 0.0
 
     for x, y in tqdm(train_loader, desc=f"Epoch {ep}/{epochs-1}", leave=False):
         x = x.to(device, non_blocking=True)
@@ -177,46 +170,47 @@ for ep in range(epochs):
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Note: Model now outputs exactly (batch, nx, ny, time_out)
         out = model(x)
         
-        loss = myloss(out, y)
+        # Backward pass on normalized space (fair spatial gradients)
+        loss = train_loss_fn(out, y)
         loss.backward()
         optimizer.step()
         
-        train_rmse += loss.item()
+        # Track actual physical RMSE for monitoring
+        train_rmse_metric += metric_loss(out.detach(), y).item()
 
     scheduler.step()
 
     # VALIDATION
     model.eval()
-    test_rmse = 0.0
+    test_rmse_metric = 0.0
     with torch.no_grad():
         for x, y in test_loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             
             out = model(x)
-            test_rmse += myloss(out, y).item()
+            test_rmse_metric += metric_loss(out, y).item()
 
-    train_rmse /= len(train_loader)
-    test_rmse  /= len(test_loader)
+    train_rmse_metric /= len(train_loader)
+    test_rmse_metric  /= len(test_loader)
 
     epoch_duration = time.time() - t_epoch_start
     log.append({
         "epoch": ep,
         "duration": epoch_duration,
-        "train_rmse": train_rmse,
-        "val_rmse": test_rmse
+        "train_rmse": train_rmse_metric,
+        "val_rmse": test_rmse_metric
     })
 
-    print(f"Epoch {ep} | Time: {epoch_duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {test_rmse:.4f}")
+    print(f"Epoch {ep} | Time: {epoch_duration:.1f}s | Train RMSE: {train_rmse_metric:.4f} | Val RMSE: {test_rmse_metric:.4f}")
 
     # ==========================================
     # SMART CHECKPOINTING & EARLY STOPPING
     # ==========================================
-    if test_rmse < best_val_rmse:
-        best_val_rmse = test_rmse
+    if test_rmse_metric < best_val_rmse:
+        best_val_rmse = test_rmse_metric
         epochs_without_improvement = 0
         
         ckpt_path = cfg.paths.model_save_path.replace(".pt", f"_best.pt")
