@@ -162,7 +162,7 @@ os.makedirs(os.path.dirname(cfg.paths.model_save_path), exist_ok=True)
 epochs = cfg.training.epochs 
 log = []
 best_val_rmse = float('inf') # Track the best score
-patience = 10                # Stop if no improvement for 10 epochs
+patience = 4                # Stop if no improvement for 10 epochs
 epochs_without_improvement = 0
 
 print("\nStarting Training...")
