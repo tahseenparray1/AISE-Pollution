@@ -32,10 +32,10 @@ features:
 
 model:
   modes: 12
-  width: 64
+  width: 128
 
 training:
-  batch_size: 6
+  batch_size: 4
   epochs: 3
   lr: 1e-3
   weight_decay: 1e-4

@@ -161,6 +161,9 @@ os.makedirs(os.path.dirname(cfg.paths.model_save_path), exist_ok=True)
 # ==========================================
 epochs = cfg.training.epochs 
 log = []
+best_val_rmse = float('inf') # Track the best score
+patience = 10                # Stop if no improvement for 10 epochs
+epochs_without_improvement = 0
 
 print("\nStarting Training...")
 for ep in range(epochs):
@@ -174,7 +177,8 @@ for ep in range(epochs):
         
         optimizer.zero_grad(set_to_none=True)
         
-        out = model(x).view(x.size(0), S1, S2, cfg.data.time_out)
+        # Note: Model now outputs exactly (batch, nx, ny, time_out)
+        out = model(x)
         
         loss = myloss(out, y)
         loss.backward()
@@ -192,7 +196,7 @@ for ep in range(epochs):
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             
-            out = model(x).view(x.size(0), S1, S2, cfg.data.time_out)
+            out = model(x)
             test_rmse += myloss(out, y).item()
 
     train_rmse /= len(train_loader)
@@ -208,17 +212,31 @@ for ep in range(epochs):
 
     print(f"Epoch {ep} | Time: {epoch_duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {test_rmse:.4f}")
 
-    # CHECKPOINTING
-    if (ep + 1) % cfg.training.checkpoint_every == 0:
-        ckpt_path = cfg.paths.model_save_path.replace(".pt", f"_ep{ep}.pt")
+    # ==========================================
+    # SMART CHECKPOINTING & EARLY STOPPING
+    # ==========================================
+    if test_rmse < best_val_rmse:
+        best_val_rmse = test_rmse
+        epochs_without_improvement = 0
+        
+        ckpt_path = cfg.paths.model_save_path.replace(".pt", f"_best.pt")
+        print(f"  -> New best validation score! Saving model to {ckpt_path}")
         torch.save({
             'epoch': ep,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
+            'best_val_rmse': best_val_rmse
         }, ckpt_path)
+    else:
+        epochs_without_improvement += 1
+        print(f"  -> No improvement for {epochs_without_improvement} epoch(s).")
         
-        with open(cfg.paths.save_dir, "w") as f:
-            json.dump(log, f, indent=4)
+    with open(cfg.paths.save_dir, "w") as f:
+        json.dump(log, f, indent=4)
+        
+    if epochs_without_improvement >= patience:
+        print(f"\nEarly stopping triggered at epoch {ep}! Validation RMSE hasn't improved in {patience} epochs.")
+        break
 
 print("\nTraining Complete!")
