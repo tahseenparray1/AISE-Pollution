@@ -109,12 +109,12 @@ batch_size = cfg.training.batch_size
 
 train_loader = torch.utils.data.DataLoader(
     train_dataset, batch_size=batch_size, shuffle=True, 
-    num_workers=1, pin_memory=True, persistent_workers=True 
+    num_workers=2, pin_memory=True, persistent_workers=True 
 )
 
 test_loader = torch.utils.data.DataLoader(
     test_dataset, batch_size=batch_size, shuffle=False, 
-    num_workers=1, pin_memory=True, persistent_workers=True
+    num_workers=2, pin_memory=True, persistent_workers=True
 )
 
 # ==========================================
@@ -173,8 +173,12 @@ for ep in range(epochs):
         out = model(x)
         
         # Backward pass on normalized space (fair spatial gradients)
-        loss = train_loss_fn(out, y)
+        loss = metric_loss(out, y) 
         loss.backward()
+        
+        # ADD THIS: Gradient clipping prevents exploding gradients in high-pollution areas
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()
         
         # Track actual physical RMSE for monitoring

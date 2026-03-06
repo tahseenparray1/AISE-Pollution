@@ -90,7 +90,7 @@ class TestDataLoader(torch.utils.data.Dataset):
 
         # 4. Stack and reshape the other features
         # 15 features of shape (140, 124, 26) -> (140, 124, 15, 26) -> (140, 124, 390)
-        other_feats = torch.stack(other_feats_list, dim=-2)
+        other_feats = torch.stack(other_feats_list, dim=-1)
         other_feats = other_feats.reshape(self.S1, self.S2, -1)
         
         # 5. Concatenate PM2.5 (10) with others (390) to create 400 input channels
