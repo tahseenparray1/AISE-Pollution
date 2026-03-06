@@ -27,7 +27,6 @@ print("Loading grid-wise normalization stats...")
 stats = np.load('/kaggle/working/grid_robust_stats.npy', allow_pickle=True).item()
 
 # Extract target (cpm25) stats and reshape for broadcasting over (batch, S1, S2, time_out)
-# Original shape is (140, 124), target shape needs to be (1, 140, 124, 1)
 pm_median = stats['cpm25']['median'].reshape(1, cfg.data.S1, cfg.data.S2, 1)
 pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg.data.S1, cfg.data.S2, 1)
 
@@ -40,15 +39,14 @@ def denorm(x):
 # ==========================================
 class TestDataLoader(torch.utils.data.Dataset):
     def __init__(self, cfg, stats_dict):
-        self.time_in = cfg.data.time_input
-        self.time_out = cfg.data.time_out
+        self.time_in = cfg.data.time_input    # 10
+        self.total_time = cfg.data.total_time # 26
         self.S1 = cfg.data.S1
         self.S2 = cfg.data.S2
         
         self.met_variables = cfg.features.met_variables
         self.emi_variables = cfg.features.emission_variables
         self.all_features = self.met_variables + self.emi_variables
-        self.V = cfg.features.V
         self.stats = stats_dict
 
         # Load all 16 files lazily
@@ -64,27 +62,44 @@ class TestDataLoader(torch.utils.data.Dataset):
         return self.N
 
     def __getitem__(self, idx):
-        # Create an empty block for the 10-hour history: (10, 140, 124, 16)
-        x = np.empty((self.time_in, self.S1, self.S2, self.V), dtype=np.float32)
+        pm25_hist = None
+        other_feats_list = []
 
-        for c, feat in enumerate(self.all_features):
-            # Grab the 10 hours for this specific sample and feature
-            # Shape is (10, 140, 124)
-            arr = np.array(self.arrs[feat][idx, :self.time_in], dtype=np.float32)
+        for feat in self.all_features:
+            # 1. Handle the temporal asymmetry of the Kaggle test set
+            if feat == "cpm25":
+                # Only 10 hours available for PM2.5 in test_in
+                arr = np.array(self.arrs[feat][idx, :self.time_in], dtype=np.float32)
+            else:
+                # Full 26 hours available for weather/emissions in test_in
+                arr = np.array(self.arrs[feat][idx, :self.total_time], dtype=np.float32)
             
-            # --- Grid-wise Normalize ---
-            # numpy automatically broadcasts the (140, 124) stats against the (10, 140, 124) array
+            # 2. Grid-wise Normalize
             f_median = self.stats[feat]['median']
             f_iqr = self.stats[feat]['iqr']
-            
             arr = (arr - f_median) / f_iqr
-            x[..., c] = arr
+            
+            # 3. Permute Time to the last dimension
+            if feat == "cpm25":
+                # (10, 140, 124) -> (140, 124, 10)
+                pm25_hist = torch.from_numpy(arr).permute(1, 2, 0)
+            else:
+                # (26, 140, 124) -> (140, 124, 26)
+                arr_t = torch.from_numpy(arr).permute(1, 2, 0)
+                other_feats_list.append(arr_t)
 
-        return torch.from_numpy(x)
+        # 4. Stack and reshape the other features
+        # 15 features of shape (140, 124, 26) -> (140, 124, 15, 26) -> (140, 124, 390)
+        other_feats = torch.stack(other_feats_list, dim=-2)
+        other_feats = other_feats.reshape(self.S1, self.S2, -1)
+        
+        # 5. Concatenate PM2.5 (10) with others (390) to create 400 input channels
+        x = torch.cat((pm25_hist, other_feats), dim=-1)
+
+        return x
 
 test_dataset = TestDataLoader(cfg, stats)
 
-# Batch size of 4 or 8 is safe here since we don't store gradients
 test_loader = torch.utils.data.DataLoader(
     test_dataset,
     batch_size=4, 
@@ -96,17 +111,18 @@ test_loader = torch.utils.data.DataLoader(
 # ==========================================
 # 3. MODEL INITIALIZATION
 # ==========================================
-print(f"Building FNO2D Model...")
+V = len(cfg.features.met_variables) + len(cfg.features.emission_variables)
+in_channels = cfg.data.time_input + (V - 1) * cfg.data.total_time 
+
+print(f"Building FNO2D Model with {in_channels} input channels...")
 model = FNO2D(
-    time_in=cfg.data.time_input,
-    features=cfg.features.V,
+    in_channels=in_channels,
     time_out=cfg.data.time_out,
     width=cfg.model.width,
-    modes=cfg.model.modes,
+    modes=12,  # Ensure this matches the updated training parameter to prevent overfitting!
 ).to(device)
 
 print(f"Loading weights from: {cfg.paths.checkpoint}")
-
 checkpoint_path = cfg.paths.checkpoint
 
 if not os.path.exists(checkpoint_path):
@@ -121,14 +137,12 @@ if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"No .pt files found in {checkpoint_dir}. Did training save anything?")
 
 checkpoint = torch.load(checkpoint_path, map_location=device)
-
 model.load_state_dict(checkpoint['model_state_dict'])
-model.eval() # Switch to evaluation mode
+model.eval()
 
 # ==========================================
 # 4. INFERENCE LOOP
 # ==========================================
-# Prepare the final array to hold predictions (996, 140, 124, 16)
 prediction = np.zeros((len(test_dataset), cfg.data.S1, cfg.data.S2, cfg.data.time_out), dtype=np.float32)
 
 print("Starting inference...")
@@ -137,10 +151,10 @@ current_idx = 0
 with torch.no_grad():
     for x in tqdm(test_loader):
         x = x.to(device, non_blocking=True)
-        bs = x.size(0) # Get current batch size
+        bs = x.size(0)
         
-        # Forward pass and reshape
-        out = model(x).view(bs, cfg.data.S1, cfg.data.S2, cfg.data.time_out)
+        # Forward pass (model now outputs exactly batch, nx, ny, time_out)
+        out = model(x)
         
         # Un-scale the data back to true PM2.5 levels
         out_real = denorm(out.cpu().numpy())

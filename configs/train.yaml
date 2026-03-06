@@ -31,7 +31,7 @@ features:
     - "bio"
 
 model:
-  modes: 24
+  modes: 12
   width: 64
 
 training:

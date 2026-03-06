@@ -83,11 +83,23 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         start_idx = idx * self.stride
         end_idx = start_idx + self.window_size
         
-        # Slice directly from the in-memory tensor (0 disk I/O)
-        window = self.data[start_idx:end_idx]
+        # 1. Slice the full 26-hour window
+        window = self.data[start_idx:end_idx] # Shape: (26, 140, 124, 16)
         
-        x = window[:self.time_in]
-        y = window[self.time_in:, ..., 0].permute(1, 2, 0)
+        # 2. Historical PM2.5 (First 10 hours, Feature Index 0)
+        pm25_hist = window[:self.time_in, ..., 0]   # Shape: (10, 140, 124)
+        pm25_hist = pm25_hist.permute(1, 2, 0)      # Shape: (140, 124, 10)
+        
+        # 3. Full Weather & Emissions (All 26 hours, Feature Indices 1 to 15)
+        other_feats = window[:, ..., 1:]            # Shape: (26, 140, 124, 15)
+        # Flatten the 26 hours and 15 features into a single dimension of 390
+        other_feats = other_feats.permute(1, 2, 0, 3).reshape(140, 124, -1) # Shape: (140, 124, 390)
+        
+        # 4. Stack them together into 400 channels
+        x = torch.cat((pm25_hist, other_feats), dim=-1) # Shape: (140, 124, 400)
+        
+        # 5. Target is the future 16 hours of PM2.5 (Index 0)
+        y = window[self.time_in:, ..., 0].permute(1, 2, 0) # Shape: (140, 124, 16)
         
         return x, y
 
@@ -119,9 +131,11 @@ test_loader = torch.utils.data.DataLoader(
 # 4. MODEL & OPTIMIZER
 # ==========================================
 print(f"Building FNO2D with {V} features...")
+
+in_channels = cfg.data.time_input + (V - 1) * cfg.data.total_time 
+
 model = FNO2D(
-    time_in=cfg.data.time_input,
-    features=V,
+    in_channels=in_channels,
     time_out=cfg.data.time_out,
     width=cfg.model.width,
     modes=cfg.model.modes,
