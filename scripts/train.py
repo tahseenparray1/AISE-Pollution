@@ -109,12 +109,12 @@ batch_size = cfg.training.batch_size
 
 train_loader = torch.utils.data.DataLoader(
     train_dataset, batch_size=batch_size, shuffle=True, 
-    num_workers=0, pin_memory=True, persistent_workers=True 
+    num_workers=1, pin_memory=True, persistent_workers=True 
 )
 
 test_loader = torch.utils.data.DataLoader(
     test_dataset, batch_size=batch_size, shuffle=False, 
-    num_workers=0, pin_memory=True, persistent_workers=True
+    num_workers=1, pin_memory=True, persistent_workers=True
 )
 
 # ==========================================
