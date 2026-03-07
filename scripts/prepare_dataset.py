@@ -51,7 +51,7 @@ def compute_gridwise_robust_stats(features, months):
         }
         
     # Save the new 2D spatial stats dictionary
-    np.save('/kaggle/working/grid_robust_stats.npy', stats)
+    np.save('/content/grid_robust_stats.npy', stats)
     return stats
 
 # Generate our spatial stats
