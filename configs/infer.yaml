@@ -31,4 +31,4 @@ features:
 
 model:
   modes: 12
-  width: 128
+  width: 64

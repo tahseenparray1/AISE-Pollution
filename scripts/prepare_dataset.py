@@ -36,13 +36,11 @@ def compute_gridwise_robust_stats(features, months):
         feat_data = np.concatenate(feat_data, axis=0)
         
         # Calculate Grid-wise Median and IQR along the time axis (axis=0)
-        # Resulting shapes will be exactly (140, 124)
         median = np.median(feat_data, axis=0)
         q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
         iqr = q75 - q25
         
         # FIX: Prevent exploding values for sparse features (like rain). 
-        # If the IQR is near zero, set it to 1.0 to avoid scaling up rare events to infinity.
         iqr = np.where(iqr < 1e-3, 1.0, iqr)
         
         stats[feat] = {
@@ -58,10 +56,10 @@ def compute_gridwise_robust_stats(features, months):
 global_stats = compute_gridwise_robust_stats(all_features, cfg.data.months)
 
 # ==========================================
-# 3. HELPER FUNCTIONS
+# 3. HELPER FUNCTIONS (THE CHRONOLOGICAL FIX)
 # ==========================================
 def process_month(month_name):
-    """ Loads, scales, and stacks ONE month using grid-wise IQR. """
+    """ Loads, scales, and stacks ONE month using interleaved block splitting. """
     month_data = []
     
     for feat in all_features:
@@ -72,18 +70,39 @@ def process_month(month_name):
         median = global_stats[feat]['median']
         iqr = global_stats[feat]['iqr']
         
-        # Grid-wise Scaling (numpy automatically broadcasts the 2D stats across the temporal dimension)
+        # Grid-wise Scaling
         arr = (arr - median) / iqr
-        
         month_data.append(arr)
         
     # Stack into 4D array: (Hours, 140, 124, 16_features)
     combined = np.stack(month_data, axis=-1)
     
-    # Chronological Split (No leakage)
-    split_idx = int(combined.shape[0] * (1 - cfg.data.val_frac))
-    train_raw = combined[:split_idx]
-    val_raw = combined[split_idx:]
+    # --- NEW: Interleaved Block Splitting ---
+    # We split the month into repeating 15-day cycles:
+    # 12 days for training (80%), 3 days for validation (20%)
+    train_blocks = []
+    val_blocks = []
+    
+    train_chunk_size = 12 * 24  # 12 days in hours
+    val_chunk_size = 3 * 24     # 3 days in hours
+    cycle_size = train_chunk_size + val_chunk_size
+    
+    total_hours = combined.shape[0]
+    
+    for start_idx in range(0, total_hours, cycle_size):
+        end_train = min(start_idx + train_chunk_size, total_hours)
+        end_val = min(start_idx + cycle_size, total_hours)
+        
+        # Append the 12-day train chunk
+        train_blocks.append(combined[start_idx:end_train])
+        
+        # Append the 3-day val chunk (if there's data left in the month)
+        if end_val > end_train:
+            val_blocks.append(combined[end_train:end_val])
+    
+    # Concatenate the blocks back together
+    train_raw = np.concatenate(train_blocks, axis=0)
+    val_raw = np.concatenate(val_blocks, axis=0) if val_blocks else np.empty((0, *combined.shape[1:]))
     
     return train_raw, val_raw
 
