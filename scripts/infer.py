@@ -136,7 +136,7 @@ if not os.path.exists(checkpoint_path):
     else:
         raise FileNotFoundError(f"No .pt files found in {checkpoint_dir}. Did training save anything?")
 
-checkpoint = torch.load(checkpoint_path, map_location=device)
+checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
 
