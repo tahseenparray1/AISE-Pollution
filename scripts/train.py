@@ -142,7 +142,7 @@ epochs = cfg.training.epochs
 log = []
 
 best_val_rmse = float('inf') 
-patience = 10                
+patience = 6                
 epochs_without_improvement = 0
 
 print("\nStarting Training...")

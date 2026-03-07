@@ -42,3 +42,5 @@ training:
   scheduler_step: 30
   scheduler_gamma: 0.5
   checkpoint_every: 10
+  save_checkpoint: True # Set to True to save the .pt file
+  early_stopping: True # Set to True to enable early stopping
