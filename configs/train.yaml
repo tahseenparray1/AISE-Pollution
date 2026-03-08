@@ -16,6 +16,7 @@ data:
   time_out: 16
   S1: 140
   S2: 124
+  stride: 1
 
 features:
   V: 20
