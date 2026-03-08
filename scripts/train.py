@@ -97,7 +97,7 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # ==========================================
 # 4. MODEL & OPTIMIZER
 # ==========================================
-weather_channels = (cfg.features.V - 1 + 2)
+weather_channels = (cfg.features.V - 1)  # Removed the + 2 diurnal channels
 in_channels = cfg.data.time_input + (weather_channels * cfg.data.total_time)
 
 model = FNO2D(

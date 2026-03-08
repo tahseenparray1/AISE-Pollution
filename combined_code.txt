@@ -88,6 +88,7 @@ data:
   time_out: 16
   S1: 140
   S2: 124
+  stride: 1
 
 features:
   V: 20
@@ -389,7 +390,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         weather_stack = np.stack(weather_feats_list, axis=0)
         
         # Reshape to (140, 124, Channels * Time) -> (140, 124, 21 * 26 = 546)
-        weather_tensor = torch.from_numpy(weather_stack).permute(2, 3, 0, 1).reshape(self.S1, self.S2, -1)
+        weather_tensor = torch.from_numpy(weather_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
         # Combine PM2.5 (10) + Weather (546) = 556 Channels
         x = torch.cat((pm25_hist, weather_tensor), dim=-1)
@@ -737,8 +738,8 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
 train_ds = FastInMemoryDataset("train", cfg)
 val_ds = FastInMemoryDataset("val", cfg)
 
-train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=1, pin_memory=True)
+val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=1, pin_memory=True)
 
 # ==========================================
 # 4. MODEL & OPTIMIZER
@@ -761,7 +762,8 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.trai
 # ==========================================
 best_val_rmse = float('inf')
 log = []
-
+os.makedirs(os.path.dirname(cfg.paths.model_save_path), exist_ok=True)
+os.makedirs(os.path.dirname(cfg.paths.save_dir), exist_ok=True)
 for ep in range(cfg.training.epochs):
     model.train()
     t_start = time.time()

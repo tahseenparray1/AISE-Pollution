@@ -98,28 +98,12 @@ def process_month(month_name):
         month_data.append(arr)
 
     # 2. Add Static Topography Proxy
-    time_path = os.path.join(RAW_PATH, month_name, "time.npy")
-    time_arr = np.load(time_path)
-    total_hours = len(time_arr)
+    # Get total hours from the first feature array since we no longer load time.npy
+    total_hours = month_data[0].shape[0] 
     
     # Broadcast the 2D topo map across the time dimension
     topo_time = np.broadcast_to(topo_proxy[None, :, :], (total_hours, 140, 124))
     month_data.append(topo_time)
-
-    time_str = [
-        t.decode("utf-8").replace("_", " ") if isinstance(t, bytes) else str(t).replace("_", " ")
-        for t in time_arr
-    ]
-    hours = pd.to_datetime(time_str).hour.values
-
-    sin_h = np.sin(2 * np.pi * hours / 24.0).astype(np.float32)
-    cos_h = np.cos(2 * np.pi * hours / 24.0).astype(np.float32)
-
-    sin_h = np.broadcast_to(sin_h[:, None, None], (len(hours), 140, 124))
-    cos_h = np.broadcast_to(cos_h[:, None, None], (len(hours), 140, 124))
-
-    month_data.append(sin_h)
-    month_data.append(cos_h)
 
     combined = np.stack(month_data, axis=-1)
 
