@@ -115,7 +115,8 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.trai
 # ==========================================
 best_val_rmse = float('inf')
 log = []
-
+os.makedirs(os.path.dirname(cfg.paths.model_save_path), exist_ok=True)
+os.makedirs(os.path.dirname(cfg.paths.save_dir), exist_ok=True)
 for ep in range(cfg.training.epochs):
     model.train()
     t_start = time.time()
