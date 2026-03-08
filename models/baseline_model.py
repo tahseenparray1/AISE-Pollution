@@ -2,148 +2,129 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class SpectralConv2d(nn.Module):
-    """2D Fourier layer. It does FFT, linear transform, and Inverse FFT."""
-    def __init__(self, in_channels, out_channels, modes1, modes2):
+class HaarWavelet2D(nn.Module):
+    """ Native PyTorch 2D Haar Discrete Wavelet Transform """
+    def __init__(self, in_channels):
         super().__init__()
+        # Haar wavelet filters: Low-Low, Low-High, High-Low, High-High
+        h0 = [1/2, 1/2]
+        h1 = [-1/2, 1/2]
+        
+        # Create 2D filters via outer product
+        ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
+        lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
+        hl = torch.tensor([[h0[0]*h1[0], h0[0]*h1[1]], [h0[1]*h1[0], h0[1]*h1[1]]])
+        hh = torch.tensor([[h1[0]*h1[0], h1[0]*h1[1]], [h1[1]*h1[0], h1[1]*h1[1]]])
+        
+        filters = torch.stack([ll, lh, hl, hh]).unsqueeze(1).repeat(in_channels, 1, 1, 1)
+        self.register_buffer('filters', filters)
         self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.modes1 = modes1
-        self.modes2 = modes2
-        self.scale = (1 / (in_channels * out_channels))
         
-        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, modes1, modes2, dtype=torch.cfloat))
-        self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, modes1, modes2, dtype=torch.cfloat))
-
-    def compl_mul2d(self, input, weights):
-        return torch.einsum("bixy,ioxy->boxy", input, weights)
-
     def forward(self, x):
-        batchsize = x.shape[0]
-        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1)//2 + 1, dtype=torch.cfloat, device=x.device)
-        
-        x_ft = torch.fft.rfft2(x)
-        
-        # Multiply relevant Fourier modes
-        out_ft[:, :, :self.modes1, :self.modes2] = \
-            self.compl_mul2d(x_ft[:, :, :self.modes1, :self.modes2], self.weights1)
-        out_ft[:, :, -self.modes1:, :self.modes2] = \
-            self.compl_mul2d(x_ft[:, :, -self.modes1:, :self.modes2], self.weights2)
-        
-        x = torch.fft.irfft2(out_ft, s=(x.size(-2), x.size(-1)))
-        return x
+        # Applies DWT using stride 2 convolution
+        return F.conv2d(x, self.filters, stride=2, groups=self.in_channels)
 
-class FNOBlock(nn.Module):
-    def __init__(self, width, modes):
+class InverseHaarWavelet2D(nn.Module):
+    """ Native PyTorch 2D Inverse Haar Wavelet Transform """
+    def __init__(self, in_channels):
         super().__init__()
-        self.spectral = SpectralConv2d(width, width, modes, modes)
+        h0 = [1.0, 1.0]
+        h1 = [-1.0, 1.0]
+        
+        ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
+        lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
+        hl = torch.tensor([[h0[0]*h1[0], h0[0]*h1[1]], [h0[1]*h1[0], h0[1]*h1[1]]])
+        hh = torch.tensor([[h1[0]*h1[0], h1[0]*h1[1]], [h1[1]*h1[0], h1[1]*h1[1]]])
+        
+        filters = torch.stack([ll, lh, hl, hh]).unsqueeze(1).repeat(in_channels, 1, 1, 1)
+        self.register_buffer('filters', filters)
+        self.in_channels = in_channels
+        
+    def forward(self, x):
+        # Reconstructs using transposed convolution
+        return F.conv_transpose2d(x, self.filters, stride=2, groups=self.in_channels)
+
+class WNOBlock(nn.Module):
+    """ Wavelet Neural Operator Block """
+    def __init__(self, width):
+        super().__init__()
+        self.width = width
+        self.dwt = HaarWavelet2D(width)
+        self.idwt = InverseHaarWavelet2D(width)
+        
+        # Mixes the 4 wavelet sub-bands (LL, LH, HL, HH)
+        self.spectral_mixer = nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
+        
         self.pointwise = nn.Conv2d(width, width, 1)
+        self.norm = nn.GroupNorm(4, width)
 
     def forward(self, x):
-        return F.gelu(self.spectral(x) + self.pointwise(x))
+        x_norm = self.norm(x)
+        
+        # 1. Decompose to Wavelet domain
+        x_w = self.dwt(x_norm)
+        
+        # 2. Mix frequencies
+        x_w = self.spectral_mixer(x_w)
+        
+        # 3. Reconstruct back to Spatial domain
+        out_w = self.idwt(x_w)
+        
+        # 4. Add spatial point-wise mixing and residual
+        out = out_w + self.pointwise(x_norm)
+        return x + F.gelu(out)
 
 class FNO2D(nn.Module):
-    def __init__(self, in_channels, time_out, width=64, modes=12):
+    # Renamed internal structure to WNO, kept class name FNO2D to prevent breaking your train.py imports!
+    def __init__(self, in_channels, time_out=16, width=64, modes=None):
         super().__init__()
-        self.modes = modes
         self.width = width
+        self.time_out = time_out
         
-        # ==========================================
-        # 1. TEMPORAL 3D ENCODERS 
-        # ==========================================
-        # PM2.5 History: (1 Feature over 10 hours)
-        # We use a 3x1x1 kernel to calculate temporal gradients, then collapse to 1 time step
-        self.pm_encoder = nn.Sequential(
-            nn.Conv3d(1, width // 4, kernel_size=(3, 1, 1), padding=(1, 0, 0)),
+        # Encode ablated input down to 'width'
+        self.input_encoder = nn.Sequential(
+            nn.Conv2d(in_channels + 2, width, kernel_size=1),
+            nn.GroupNorm(4, width),
             nn.GELU(),
-            nn.Conv3d(width // 4, width // 2, kernel_size=(10, 1, 1))
+            nn.Dropout2d(p=0.1) 
         )
         
-        # Weather/Emissions: (15 physical features + 2 grid coordinates = 17)
-        # We evaluate the sequence of 26 hours, then collapse it cleanly
-        self.weather_encoder = nn.Sequential(
-            nn.Conv3d(17, width // 2, kernel_size=(3, 1, 1), padding=(1, 0, 0)),
-            nn.GELU(),
-            nn.Conv3d(width // 2, width // 2, kernel_size=(26, 1, 1))
-        )
+        # Stack WNO blocks instead of FNO blocks
+        self.block0 = WNOBlock(self.width)
+        self.block1 = WNOBlock(self.width)
+        self.block2 = WNOBlock(self.width)
+        self.block3 = WNOBlock(self.width)
         
-        # Spatial FNO Blocks
-        self.block0 = FNOBlock(self.width, self.modes)
-        self.block1 = FNOBlock(self.width, self.modes)
-        self.block2 = FNOBlock(self.width, self.modes)
-        self.block3 = FNOBlock(self.width, self.modes)
-        
-        self.dropout = nn.Dropout2d(p=0.1) 
-        
-        # Decoders
-        self.fc1 = nn.Linear(self.width, 128)
-        self.fc2 = nn.Linear(128, time_out)
+        self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
+        self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1) 
 
     def get_grid(self, b, nx, ny, device):
-        """Generates static grid, expanded to match the 26-hour temporal dimension"""
         gridx = torch.linspace(0, 1, nx, device=device)
         gridy = torch.linspace(0, 1, ny, device=device)
-        gridx = gridx.view(1, 1, 1, nx, 1).repeat(b, 1, 26, 1, ny)
-        gridy = gridy.view(1, 1, 1, 1, ny).repeat(b, 1, 26, nx, 1)
-        return torch.cat((gridx, gridy), dim=1) # (b, 2, 26, nx, ny)
+        gridx = gridx.view(1, 1, nx, 1).repeat(b, 1, 1, ny)
+        gridy = gridy.view(1, 1, 1, ny).repeat(b, 1, nx, 1)
+        return torch.cat((gridx, gridy), dim=1) 
 
     def forward(self, x):
         b, nx, ny, _ = x.shape
+        last_pm25 = x[..., 9:10].permute(0, 3, 1, 2) 
         
-        # ==========================================
-        # 2. UNPACK & RESHAPE 3D INPUTS
-        # ==========================================
-        # PM2.5: (b, 1, 10, nx, ny)
-        pm25 = x[..., :10].permute(0, 3, 1, 2).unsqueeze(1)       
+        x_in = x.permute(0, 3, 1, 2)
+        grid = self.get_grid(b, nx, ny, x.device) 
+        x_in = torch.cat([x_in, grid], dim=1) 
         
-        # Weather: Unpack the 390 channels back into physical reality (15 features, 26 hours)
-        weather_flat = x[..., 10:] 
-        weather_3d = weather_flat.view(b, nx, ny, 26, 15).permute(0, 4, 3, 1, 2) # (b, 15, 26, nx, ny)
+        x_feat = self.input_encoder(x_in)
         
-        # Save absolute last known state of PM2.5 for the residual (Hour 10)
-        last_pm25 = x[..., 9:10] # (b, nx, ny, 1)
+        # WNO Spatial Mixing (No padding needed, 140 and 124 divide evenly by 2!)
+        x_wno = self.block0(x_feat)
+        x_wno = self.block1(x_wno)
+        x_wno = self.block2(x_wno)
+        x_wno = self.block3(x_wno)
         
-        # Inject Geographic Memory across all 26 hours
-        grid = self.get_grid(b, nx, ny, x.device)
-        weather_with_grid = torch.cat([weather_3d, grid], dim=1) # (b, 17, 26, nx, ny)
+        # Decode to DELTA
+        x_wno = F.gelu(self.fc1(x_wno))
+        out = self.fc2(x_wno) 
         
-        # ==========================================
-        # 3. 3D FEATURE EXTRACTION
-        # ==========================================
-        # The Conv3d layers process the temporal gradients and squeeze the time dimension out
-        pm_feat = self.pm_encoder(pm25).squeeze(2)                        # (b, width/2, nx, ny)
-        weather_feat = self.weather_encoder(weather_with_grid).squeeze(2) # (b, width/2, nx, ny)
+        # RESIDUAL CONNECTION
         
-        x_lifted = torch.cat([pm_feat, weather_feat], dim=1)              # (b, width, nx, ny)
-        
-        # ==========================================
-        # 4. OPTIMIZED FFT PADDING (144x128)
-        # ==========================================
-        # nx=140 + (2+2) = 144
-        # ny=124 + (2+2) = 128
-        # These dimensions are highly optimal for spectral transforms
-        pad_x, pad_y = 2, 2
-        x_padded = F.pad(x_lifted, (pad_y, pad_y, pad_x, pad_x)) 
-        
-        # ==========================================
-        # 5. SPATIAL FOURIER OPERATOR BLOCKS
-        # ==========================================
-        x_fno = self.block0(x_padded)
-        x_fno = self.block1(x_fno)       
-        x_fno = self.block2(x_fno)
-        x_fno = self.block3(x_fno)       
-        
-        # Unpad symmetrically back to 140x124
-        x_fno = x_fno[..., pad_x:-pad_x, pad_y:-pad_y]
-        x_fno = self.dropout(x_fno)
-        
-        # ==========================================
-        # 6. PROJECTION & RESIDUAL
-        # ==========================================
-        x_fno = x_fno.permute(0, 2, 3, 1) # (b, nx, ny, width)
-        x_fno = F.gelu(self.fc1(x_fno))
-        delta = self.fc2(x_fno)           # (b, nx, ny, 16)
-        
-        # Add residual to predict the physical target
-        out = last_pm25 + delta
-        return out
+        return out.permute(0, 2, 3, 1)

@@ -30,5 +30,5 @@ features:
     - "bio"
 
 model:
-  modes: 12
-  width: 64
+  modes: 8
+  width: 192

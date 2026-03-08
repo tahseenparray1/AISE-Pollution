@@ -1,0 +1,1098 @@
+===== C:\Code\AISE\configs\infer.yaml =====
+experiment:
+  name: baseline
+
+paths:
+  input_loc: /kaggle/input/competitions/aisehack-theme-2/test_in/
+  checkpoint: /kaggle/working/experiments/baseline/checkpoints/fno_baseline_best.pt
+  output_loc: /kaggle/working/
+  min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
+
+data:
+  dataset: test_in
+  ntest: 996
+  total_time: 26
+  time_input: 10
+  time_out: 16
+  S1: 140
+  S2: 124
+
+features:
+  V: 16
+  met_variables:
+    ["cpm25", "q2", "t2", "u10", "swdown", "pblh", "v10", "psfc", "rain"]
+  emission_variables:
+    - "PM25"
+    - "NH3"
+    - "SO2"
+    - "NOx"
+    - "NMVOC_e"
+    - "NMVOC_finn"
+    - "bio"
+
+model:
+  modes: 8
+  width: 192
+
+===== C:\Code\AISE\configs\prepare_dataset.yaml =====
+paths:
+  raw_path: /kaggle/input/competitions/aisehack-theme-2/raw/
+  train_savepath: /kaggle/temp/data/train/
+  val_savepath: /kaggle/temp/data/val/
+  min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
+
+data:
+  months: ["APRIL_16", "JULY_16", "OCT_16", "DEC_16"]
+  horizon: 26
+  stride: 1
+  val_frac: 0.2
+  seed: 0
+
+features:
+  met_variables_raw:
+    - cpm25
+    - q2
+    - t2
+    - u10
+    - v10
+    - swdown
+    - pblh
+    - psfc
+    - rain
+
+  emission_variables_raw:
+    - PM25
+    - NH3
+    - SO2
+    - NOx
+    - NMVOC_e
+    - NMVOC_finn
+    - bio
+
+===== C:\Code\AISE\configs\train.yaml =====
+experiment:
+  exp_name: fno_baseline
+
+paths:
+  savepath_train: /kaggle/temp/data/train/
+  savepath_val: /kaggle/temp/data/val/
+  min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
+  save_dir: /kaggle/working/experiments/baseline/logs/log.json
+  model_save_path: /kaggle/working/experiments/baseline/checkpoints/fno_baseline.pt
+
+data:
+  ntrain: 2112
+  ntest: 528
+  total_time: 26
+  time_input: 10
+  time_out: 16
+  S1: 140
+  S2: 124
+
+features:
+  V: 20
+  met_variables:
+    ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "psfc", "rain"]
+  emission_variables:
+    ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
+
+model:
+  modes: 8
+  width: 192
+
+training:
+  batch_size: 6
+  epochs: 60
+  lr: 1e-3
+  weight_decay: 1e-5
+  scheduler_step: 60
+  scheduler_gamma: 0.5
+  checkpoint_every: 10
+  save_checkpoint: True # Set to True to save the .pt file
+  early_stopping: True # Set to True to enable early stopping
+
+===== C:\Code\AISE\models\baseline_model.py =====
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class HaarWavelet2D(nn.Module):
+    """ Native PyTorch 2D Haar Discrete Wavelet Transform """
+    def __init__(self, in_channels):
+        super().__init__()
+        # Haar wavelet filters: Low-Low, Low-High, High-Low, High-High
+        h0 = [1/2, 1/2]
+        h1 = [-1/2, 1/2]
+        
+        # Create 2D filters via outer product
+        ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
+        lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
+        hl = torch.tensor([[h0[0]*h1[0], h0[0]*h1[1]], [h0[1]*h1[0], h0[1]*h1[1]]])
+        hh = torch.tensor([[h1[0]*h1[0], h1[0]*h1[1]], [h1[1]*h1[0], h1[1]*h1[1]]])
+        
+        filters = torch.stack([ll, lh, hl, hh]).unsqueeze(1).repeat(in_channels, 1, 1, 1)
+        self.register_buffer('filters', filters)
+        self.in_channels = in_channels
+        
+    def forward(self, x):
+        # Applies DWT using stride 2 convolution
+        return F.conv2d(x, self.filters, stride=2, groups=self.in_channels)
+
+class InverseHaarWavelet2D(nn.Module):
+    """ Native PyTorch 2D Inverse Haar Wavelet Transform """
+    def __init__(self, in_channels):
+        super().__init__()
+        h0 = [1.0, 1.0]
+        h1 = [-1.0, 1.0]
+        
+        ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
+        lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
+        hl = torch.tensor([[h0[0]*h1[0], h0[0]*h1[1]], [h0[1]*h1[0], h0[1]*h1[1]]])
+        hh = torch.tensor([[h1[0]*h1[0], h1[0]*h1[1]], [h1[1]*h1[0], h1[1]*h1[1]]])
+        
+        filters = torch.stack([ll, lh, hl, hh]).unsqueeze(1).repeat(in_channels, 1, 1, 1)
+        self.register_buffer('filters', filters)
+        self.in_channels = in_channels
+        
+    def forward(self, x):
+        # Reconstructs using transposed convolution
+        return F.conv_transpose2d(x, self.filters, stride=2, groups=self.in_channels)
+
+class WNOBlock(nn.Module):
+    """ Wavelet Neural Operator Block """
+    def __init__(self, width):
+        super().__init__()
+        self.width = width
+        self.dwt = HaarWavelet2D(width)
+        self.idwt = InverseHaarWavelet2D(width)
+        
+        # Mixes the 4 wavelet sub-bands (LL, LH, HL, HH)
+        self.spectral_mixer = nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
+        
+        self.pointwise = nn.Conv2d(width, width, 1)
+        self.norm = nn.GroupNorm(4, width)
+
+    def forward(self, x):
+        x_norm = self.norm(x)
+        
+        # 1. Decompose to Wavelet domain
+        x_w = self.dwt(x_norm)
+        
+        # 2. Mix frequencies
+        x_w = self.spectral_mixer(x_w)
+        
+        # 3. Reconstruct back to Spatial domain
+        out_w = self.idwt(x_w)
+        
+        # 4. Add spatial point-wise mixing and residual
+        out = out_w + self.pointwise(x_norm)
+        return x + F.gelu(out)
+
+class FNO2D(nn.Module):
+    # Renamed internal structure to WNO, kept class name FNO2D to prevent breaking your train.py imports!
+    def __init__(self, in_channels, time_out=16, width=64, modes=None):
+        super().__init__()
+        self.width = width
+        self.time_out = time_out
+        
+        # Encode ablated input down to 'width'
+        self.input_encoder = nn.Sequential(
+            nn.Conv2d(in_channels + 2, width, kernel_size=1),
+            nn.GroupNorm(4, width),
+            nn.GELU(),
+            nn.Dropout2d(p=0.1) 
+        )
+        
+        # Stack WNO blocks instead of FNO blocks
+        self.block0 = WNOBlock(self.width)
+        self.block1 = WNOBlock(self.width)
+        self.block2 = WNOBlock(self.width)
+        self.block3 = WNOBlock(self.width)
+        
+        self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
+        self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1) 
+
+    def get_grid(self, b, nx, ny, device):
+        gridx = torch.linspace(0, 1, nx, device=device)
+        gridy = torch.linspace(0, 1, ny, device=device)
+        gridx = gridx.view(1, 1, nx, 1).repeat(b, 1, 1, ny)
+        gridy = gridy.view(1, 1, 1, ny).repeat(b, 1, nx, 1)
+        return torch.cat((gridx, gridy), dim=1) 
+
+    def forward(self, x):
+        b, nx, ny, _ = x.shape
+        last_pm25 = x[..., 9:10].permute(0, 3, 1, 2) 
+        
+        x_in = x.permute(0, 3, 1, 2)
+        grid = self.get_grid(b, nx, ny, x.device) 
+        x_in = torch.cat([x_in, grid], dim=1) 
+        
+        x_feat = self.input_encoder(x_in)
+        
+        # WNO Spatial Mixing (No padding needed, 140 and 124 divide evenly by 2!)
+        x_wno = self.block0(x_feat)
+        x_wno = self.block1(x_wno)
+        x_wno = self.block2(x_wno)
+        x_wno = self.block3(x_wno)
+        
+        # Decode to DELTA
+        x_wno = F.gelu(self.fc1(x_wno))
+        out = self.fc2(x_wno) 
+        
+        # RESIDUAL CONNECTION
+        
+        return out.permute(0, 2, 3, 1)
+
+===== C:\Code\AISE\models\__init__.py =====
+
+===== C:\Code\AISE\scripts\infer.py =====
+import os
+import torch
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+import warnings
+
+from models.baseline_model import FNO2D
+from src.utils.config import load_config
+
+warnings.filterwarnings("ignore")
+
+# ==========================================
+# 1. SETUP & CONFIGURATION
+# ==========================================
+# Load both configs to ensure test paths and model architecture match perfectly
+cfg_infer = load_config("configs/infer.yaml")
+cfg_train = load_config("configs/train.yaml")
+
+torch.manual_seed(0)
+np.random.seed(0)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# -----------------------
+# Load Grid-Wise Robust Stats 
+# -----------------------
+print("Loading grid-wise normalization stats...")
+stats_path = '/kaggle/working/grid_robust_stats.npy'
+stats = np.load(stats_path, allow_pickle=True).item()
+
+pm_median = stats['cpm25']['median'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 1)
+pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 1)
+
+def denorm(x):
+    """ Inverse the robust scaling """
+    return (x * pm_iqr) + pm_median
+
+# Compute Static Topography Proxy using the training stats
+psfc_median = stats['psfc']['median']
+topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
+
+# ==========================================
+# 2. DATA LOADER
+# ==========================================
+class TestDataLoader(torch.utils.data.Dataset):
+    def __init__(self, cfg_infer, cfg_train, stats_dict, topo_proxy):
+        self.time_in = cfg_train.data.time_input    # 10
+        self.total_time = cfg_train.data.total_time # 26
+        self.S1 = cfg_train.data.S1
+        self.S2 = cfg_train.data.S2
+        
+        # Pull raw feature requirements from train config to match training logic
+        self.met_variables = cfg_train.features.met_variables
+        self.emi_variables = cfg_train.features.emission_variables
+        self.raw_features = self.met_variables + self.emi_variables
+        self.derived_features = cfg_train.features.derived_variables
+        self.all_features = self.raw_features + self.derived_features
+        
+        self.stats = stats_dict
+        self.topo_proxy = topo_proxy
+
+        # Load raw files lazily
+        self.arrs = {}
+        for feat in self.raw_features:
+            path = os.path.join(cfg_infer.paths.input_loc, f"{feat}.npy")
+            self.arrs[feat] = np.load(path, mmap_mode="r")
+
+        # Load Time Array for Diurnal Features
+        time_path = os.path.join(cfg_infer.paths.input_loc, "time.npy")
+        if os.path.exists(time_path):
+            self.time_arr = np.load(time_path)
+        else:
+            raise FileNotFoundError("time.npy not found in test_in! Diurnal features cannot be built.")
+
+        self.N = self.arrs[self.raw_features[0]].shape[0]
+
+    def __len__(self):
+        return self.N
+
+    def __getitem__(self, idx):
+        # 1. Extract Diurnal Features for this sample
+        t_sample = self.time_arr[idx, :self.total_time]
+        t_str = [t.decode('utf-8').replace('_', ' ') if isinstance(t, bytes) else str(t).replace('_', ' ') for t in t_sample]
+        hours = pd.to_datetime(t_str).hour.values
+        
+        sin_h = np.sin(2 * np.pi * hours / 24.0).astype(np.float32)
+        cos_h = np.cos(2 * np.pi * hours / 24.0).astype(np.float32)
+        sin_h = np.broadcast_to(sin_h[:, None, None], (self.total_time, self.S1, self.S2))
+        cos_h = np.broadcast_to(cos_h[:, None, None], (self.total_time, self.S1, self.S2))
+
+        # 2. Extract Raw Sequence Data
+        seq_raw = {}
+        for feat in self.raw_features:
+            if feat == "cpm25":
+                seq_raw[feat] = np.array(self.arrs[feat][idx, :self.time_in], dtype=np.float32)
+            else:
+                seq_raw[feat] = np.array(self.arrs[feat][idx, :self.total_time], dtype=np.float32)
+                
+        # 3. Compute Derived Features on the fly
+        ws = np.sqrt(seq_raw['u10']**2 + seq_raw['v10']**2)
+        vc = np.log1p(ws * seq_raw['pblh']) # Log transform applied immediately
+        rm = (seq_raw['rain'] > 0).astype(np.float32)
+        
+        # 4. Apply Log Transforms to Skewed Raw Data
+        skewed_features = ['rain', 'bio', 'NMVOC_finn']
+        for feat in skewed_features:
+            seq_raw[feat] = np.log1p(seq_raw[feat])
+
+        # 5. Normalize and Separate PM2.5 from Weather
+        pm25_hist = None
+        weather_feats_list = []
+        
+        for feat in self.all_features:
+            # Route to the correct array
+            if feat in seq_raw: arr = seq_raw[feat]
+            elif feat == 'wind_speed': arr = ws
+            elif feat == 'vent_coef': arr = vc
+            elif feat == 'rain_mask': arr = rm
+
+            # Apply robust scaling
+            f_median = self.stats[feat]['median']
+            f_iqr = self.stats[feat]['iqr']
+            arr = (arr - f_median) / f_iqr
+            
+            if feat == "cpm25":
+                pm25_hist = torch.from_numpy(arr).permute(1, 2, 0) # (140, 124, 10)
+            else:
+                weather_feats_list.append(arr)
+
+        # 6. Append Topography Map
+        topo_time = np.broadcast_to(self.topo_proxy[None, :, :], (self.total_time, self.S1, self.S2))
+        weather_feats_list.append(topo_time)
+
+        # 7. Append Diurnal waves and stack
+        weather_feats_list.append(sin_h)
+        weather_feats_list.append(cos_h)
+        
+        weather_stack = np.stack(weather_feats_list, axis=0)
+        
+        # Reshape to (140, 124, Channels * Time) -> (140, 124, 21 * 26 = 546)
+        weather_tensor = torch.from_numpy(weather_stack).permute(2, 3, 0, 1).reshape(self.S1, self.S2, -1)
+        
+        # Combine PM2.5 (10) + Weather (546) = 556 Channels
+        x = torch.cat((pm25_hist, weather_tensor), dim=-1)
+
+        return x
+
+test_dataset = TestDataLoader(cfg_infer, cfg_train, stats, topo_proxy)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
+
+# ==========================================
+# 3. MODEL INITIALIZATION
+# ==========================================
+weather_channels = (cfg_train.features.V - 1 + 2) # 20 raw/derived - 1 pm25 + 2 diurnal
+in_channels = cfg_train.data.time_input + (weather_channels * cfg_train.data.total_time)
+
+print(f"Building WNO Model with {in_channels} input channels...")
+model = FNO2D(
+    in_channels=in_channels,
+    time_out=cfg_train.data.time_out,
+    width=cfg_train.model.width,
+    modes=cfg_train.model.modes
+).to(device)
+
+checkpoint_path = cfg_train.paths.model_save_path.replace(".pt", "_best.pt")
+print(f"Loading best weights from: {checkpoint_path}")
+checkpoint = torch.load(checkpoint_path, map_location=device)
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
+
+# ==========================================
+# 4. INFERENCE LOOP
+# ==========================================
+prediction = np.zeros((len(test_dataset), cfg_train.data.S1, cfg_train.data.S2, cfg_train.data.time_out), dtype=np.float32)
+
+print("Starting inference...")
+current_idx = 0
+
+with torch.no_grad():
+    for x in tqdm(test_loader):
+        x = x.to(device, non_blocking=True)
+        bs = x.size(0)
+        
+        out = model(x)
+        out_real = denorm(out.cpu().numpy())
+        
+        prediction[current_idx : current_idx + bs] = out_real
+        current_idx += bs
+
+# ==========================================
+# 5. EXPORT PREDICTIONS
+# ==========================================
+os.makedirs(cfg_infer.paths.output_loc, exist_ok=True)
+out_file = os.path.join(cfg_infer.paths.output_loc, 'preds.npy')
+
+np.save(out_file, prediction)
+print(f"Success! Predictions saved to: {out_file}")
+print(f"Final array shape: {prediction.shape}")
+
+===== C:\Code\AISE\scripts\prepare_dataset.py =====
+import os
+import numpy as np
+from tqdm import tqdm
+from src.utils.config import load_config
+import pandas as pd
+
+# ==========================================
+# 1. SETUP & CONFIGURATION
+# ==========================================
+cfg = load_config("configs/prepare_dataset.yaml")
+RAW_PATH = cfg.paths.raw_path
+
+# We define the derived features we want to calculate
+derived_features = ['wind_speed', 'vent_coef','rain_mask']
+skewed_features = ['vent_coef', 'rain', 'bio', 'NMVOC_finn']
+all_features = cfg.features.met_variables_raw + cfg.features.emission_variables_raw + derived_features
+
+# ==========================================
+# 2. PHYSICS HELPER & STATS CALCULATOR
+# ==========================================
+def load_raw_or_derived(feat, month):
+    """Loads raw .npy files, computes physics, and applies log-transforms to skewed data."""
+    
+    # 1. Physics Features
+    if feat == 'wind_speed':
+        u = np.load(os.path.join(RAW_PATH, month, "u10.npy")).astype(np.float32)
+        v = np.load(os.path.join(RAW_PATH, month, "v10.npy")).astype(np.float32)
+        return np.sqrt(u**2 + v**2)
+        
+    elif feat == 'vent_coef':
+        u = np.load(os.path.join(RAW_PATH, month, "u10.npy")).astype(np.float32)
+        v = np.load(os.path.join(RAW_PATH, month, "v10.npy")).astype(np.float32)
+        ws = np.sqrt(u**2 + v**2)
+        pblh = np.load(os.path.join(RAW_PATH, month, "pblh.npy")).astype(np.float32)
+        vc = ws * pblh
+        # Apply Log Transform immediately to compress the massive variance
+        return np.log1p(vc)
+        
+    elif feat == 'rain_mask':
+        rain = np.load(os.path.join(RAW_PATH, month, "rain.npy")).astype(np.float32)
+        # Binary mask: 1.0 if raining, 0.0 if not
+        return (rain > 0).astype(np.float32)
+        
+    # 2. Raw Features
+    else:
+        arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
+        
+        # 3. Log-Transform Skewed Raw Features
+        skewed_features = ['rain', 'bio', 'NMVOC_finn']
+        if feat in skewed_features:
+            arr = np.log1p(arr)
+            
+        return arr
+
+def compute_gridwise_robust_stats(features, months):
+    print("Step 1: Calculating Grid-Wise Robust Statistics (including derived features)...")
+    stats = {}
+    
+    for feat in tqdm(features, desc="Scanning features"):
+        feat_data = []
+        for month in months:
+            data = load_raw_or_derived(feat, month)
+            feat_data.append(data)
+            
+        feat_data = np.concatenate(feat_data, axis=0)
+        
+        median = np.median(feat_data, axis=0)
+        q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
+        iqr = q75 - q25
+        iqr = np.clip(iqr, a_min=5.0, a_max=None)
+        
+        stats[feat] = {
+            'median': median.astype(np.float32),
+            'iqr': iqr.astype(np.float32)
+        }
+        
+    np.save('/kaggle/working/grid_robust_stats.npy', stats)
+    return stats
+
+global_stats = compute_gridwise_robust_stats(all_features, cfg.data.months)
+
+# Calculate Static Topography Proxy (Spatial normalization of the temporal median of surface pressure)
+psfc_median = global_stats['psfc']['median']
+topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
+
+# ==========================================
+# 3. HELPER FUNCTIONS
+# ==========================================
+def process_month(month_name):
+    month_data = []
+
+    # 1. Load and Standardize Physical & Derived Features
+    for feat in all_features:
+        arr = load_raw_or_derived(feat, month_name)
+        median = global_stats[feat]["median"]
+        iqr = global_stats[feat]["iqr"]
+        arr = (arr - median) / iqr
+        month_data.append(arr)
+
+    # 2. Add Static Topography Proxy
+    time_path = os.path.join(RAW_PATH, month_name, "time.npy")
+    time_arr = np.load(time_path)
+    total_hours = len(time_arr)
+    
+    # Broadcast the 2D topo map across the time dimension
+    topo_time = np.broadcast_to(topo_proxy[None, :, :], (total_hours, 140, 124))
+    month_data.append(topo_time)
+
+    time_str = [
+        t.decode("utf-8").replace("_", " ") if isinstance(t, bytes) else str(t).replace("_", " ")
+        for t in time_arr
+    ]
+    hours = pd.to_datetime(time_str).hour.values
+
+    sin_h = np.sin(2 * np.pi * hours / 24.0).astype(np.float32)
+    cos_h = np.cos(2 * np.pi * hours / 24.0).astype(np.float32)
+
+    sin_h = np.broadcast_to(sin_h[:, None, None], (len(hours), 140, 124))
+    cos_h = np.broadcast_to(cos_h[:, None, None], (len(hours), 140, 124))
+
+    month_data.append(sin_h)
+    month_data.append(cos_h)
+
+    combined = np.stack(month_data, axis=-1)
+
+    # --- Interleaved Block Splitting ---
+    train_blocks, val_blocks = [], []
+    train_chunk_size = 12 * 24
+    val_chunk_size = 3 * 24
+    cycle_size = train_chunk_size + val_chunk_size
+    total_hours = combined.shape[0]
+
+    for start_idx in range(0, total_hours, cycle_size):
+        end_train = min(start_idx + train_chunk_size, total_hours)
+        end_val = min(start_idx + cycle_size, total_hours)
+
+        train_blocks.append(combined[start_idx:end_train])
+
+        if end_val > end_train:
+            val_blocks.append(combined[end_train:end_val])
+
+    # Return the lists of blocks, do NOT concatenate them yet!
+    return train_blocks, val_blocks
+
+
+def build_dataset_and_indices(blocks, window_size, stride):
+    """Safely concatenates blocks while tracking valid start indices to prevent leakage."""
+    concatenated = []
+    valid_starts = []
+    current_offset = 0
+
+    for block in blocks:
+        T = block.shape[0]
+        # Only create windows if the block is larger than our required sequence length
+        if T >= window_size:
+            # Generate valid start indices STRICTLY within this block
+            for i in range(0, T - window_size + 1, stride):
+                valid_starts.append(current_offset + i)
+        
+        concatenated.append(block)
+        current_offset += T
+
+    return np.concatenate(concatenated, axis=0), np.array(valid_starts, dtype=np.int32)
+
+
+# ==========================================
+# 4. MAIN EXECUTION
+# ==========================================
+os.makedirs(cfg.paths.train_savepath, exist_ok=True)
+os.makedirs(cfg.paths.val_savepath, exist_ok=True)
+
+all_train_blocks, all_val_blocks = [], []
+
+print("\nStep 2: Processing and Splitting Data...")
+for month in tqdm(cfg.data.months):
+    t_blocks, v_blocks = process_month(month)
+    all_train_blocks.extend(t_blocks)
+    all_val_blocks.extend(v_blocks)
+
+print("\nStep 3: Calculating Safe Boundaries and Merging...")
+# Build final arrays and their safe index maps
+final_train, train_indices = build_dataset_and_indices(all_train_blocks, cfg.data.horizon, cfg.data.stride)
+final_val, val_indices = build_dataset_and_indices(all_val_blocks, cfg.data.horizon, cfg.data.stride)
+
+print("Saving to disk...")
+np.save(os.path.join(cfg.paths.train_savepath, "train_data.npy"), final_train)
+np.save(os.path.join(cfg.paths.train_savepath, "train_indices.npy"), train_indices) # <-- NEW
+np.save(os.path.join(cfg.paths.val_savepath, "val_data.npy"), final_val)
+np.save(os.path.join(cfg.paths.val_savepath, "val_indices.npy"), val_indices) # <-- NEW
+
+print(f"\nSuccess! Shapes saved:")
+print(f"Train array: {final_train.shape} | Valid Windows: {len(train_indices)}")
+print(f"Val array:   {final_val.shape} | Valid Windows: {len(val_indices)}")
+
+===== C:\Code\AISE\scripts\train.py =====
+import os
+import time
+import json
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from tqdm import tqdm
+from src.utils.adam import Adam
+from src.utils.config import load_config
+from models.baseline_model import FNO2D 
+
+# ==========================================
+# 1. SETUP & CONFIGURATION
+# ==========================================
+cfg = load_config("configs/train.yaml")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(0)
+np.random.seed(0)
+
+S1, S2 = cfg.data.S1, cfg.data.S2
+
+# ==========================================
+# 2. STATS & LOSS UTILITIES
+# ==========================================
+print("Loading robust grid-wise stats...")
+stats = np.load('/kaggle/working/grid_robust_stats.npy', allow_pickle=True).item()
+
+pm_median_tensor = torch.tensor(stats['cpm25']['median'], dtype=torch.float32).to(device).view(1, S1, S2, 1)
+pm_iqr_tensor = torch.tensor(stats['cpm25']['iqr'], dtype=torch.float32).to(device).view(1, S1, S2, 1)
+
+def to_physical(x_norm):
+    return (x_norm * pm_iqr_tensor) + pm_median_tensor
+
+def spatial_gradient_loss(pred_phys, target_phys):
+    dx_p = pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]
+    dx_t = target_phys[:, 1:, :, :] - target_phys[:, :-1, :, :]
+    dy_p = pred_phys[:, :, 1:, :] - pred_phys[:, :, :-1, :]
+    dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
+    return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
+
+# ==========================================
+# 3. DATA LOADER
+# ==========================================
+class FastInMemoryDataset(torch.utils.data.Dataset):
+    def __init__(self, split, cfg):
+        attr_name = f"savepath_{split}"
+        base_path = getattr(cfg.paths, attr_name)
+        self.split = split
+        
+        data_path = os.path.join(base_path, f"{split}_data.npy")
+        idx_path = os.path.join(base_path, f"{split}_indices.npy")
+        
+        print(f"[{split.upper()}] Loading into RAM: {data_path}")
+        self.data = torch.from_numpy(np.load(data_path).astype(np.float32))
+        
+        self.valid_starts = np.load(idx_path)
+        
+        self.time_in = cfg.data.time_input
+        self.total_time = cfg.data.total_time
+
+    def __len__(self): 
+        return len(self.valid_starts)
+
+    def __getitem__(self, idx):
+        start = self.valid_starts[idx]
+        
+        # CRITICAL: .clone() prevents us from permanently zeroing out the RAM cache
+        window = self.data[start : start + self.total_time].clone() 
+        
+        # --- TEST 3: CHANNEL DROPOUT (Training Only) ---
+        if self.split == 'train':
+            drop_prob = 0.10  # 10% chance to drop each feature independently
+            
+            # Indices 1 through 18 are the physical weather/emission features.
+            # (0 is PM2.5, 19 is topography, 20 & 21 are diurnal sine/cosine waves)
+            for f_idx in range(1, 19):
+                if torch.rand(1).item() < drop_prob:
+                    # Zero out this specific feature across all 26 hours for this sample
+                    window[:, ..., f_idx] = 0.0
+        # -----------------------------------------------
+        
+        pm_hist = window[:self.time_in, ..., 0].permute(1, 2, 0)
+        weather = window[:, ..., 1:].permute(1, 2, 0, 3).reshape(S1, S2, -1)
+        x = torch.cat((pm_hist, weather), dim=-1)
+        
+        y = window[self.time_in:, ..., 0].permute(1, 2, 0)
+        return x, y
+
+train_ds = FastInMemoryDataset("train", cfg)
+val_ds = FastInMemoryDataset("val", cfg)
+
+train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+
+# ==========================================
+# 4. MODEL & OPTIMIZER
+# ==========================================
+weather_channels = (cfg.features.V - 1 + 2)
+in_channels = cfg.data.time_input + (weather_channels * cfg.data.total_time)
+
+model = FNO2D(
+    in_channels=in_channels, 
+    time_out=cfg.data.time_out, 
+    width=cfg.model.width, 
+    modes=cfg.model.modes
+).to(device)
+
+optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
+
+# ==========================================
+# 5. TRAINING LOOP
+# ==========================================
+best_val_rmse = float('inf')
+log = []
+
+for ep in range(cfg.training.epochs):
+    model.train()
+    t_start = time.time()
+    train_mse_acc = 0.0
+
+    for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
+        x, y = x.to(device), y.to(device)
+        
+        x = x + torch.randn_like(x) * 0.01
+        
+        optimizer.zero_grad(set_to_none=True)
+        
+        # Single Forward Pass (Direct Multi-Step)
+        # Single Forward Pass (Direct Multi-Step)
+        out = model(x)
+        
+        pred_phys = to_physical(out)
+        targ_phys = to_physical(y)
+        
+        # --- NEW LOSS FORMULATION ---
+        # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
+        mse_loss = torch.mean((pred_phys - targ_phys) ** 2)
+        rmse_loss = torch.sqrt(mse_loss + 1e-8) # 1e-8 prevents NaN gradients at 0
+        
+        # 2. Spatial Gradient Loss (Keeps plume edges sharp)
+        loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+        
+        # 3. Blended Total Loss
+        total_loss = rmse_loss  + 0.1 * loss_grad
+        
+        total_loss.backward()
+        
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        
+        train_mse_acc += torch.mean((pred_phys.detach() - targ_phys) ** 2).item()
+
+    scheduler.step()
+
+    # VALIDATION
+    model.eval()
+    val_mse_acc = 0.0
+    with torch.no_grad():
+        for x, y in val_loader:
+            x, y = x.to(device), y.to(device)
+            out = model(x)
+            pred_phys = to_physical(out)
+            targ_phys = to_physical(y)
+            val_mse_acc += torch.mean((pred_phys - targ_phys) ** 2).item()
+
+    train_rmse = np.sqrt(train_mse_acc / len(train_loader))
+    val_rmse = np.sqrt(val_mse_acc / len(val_loader))
+    
+    duration = time.time() - t_start
+    print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
+
+    if val_rmse < best_val_rmse:
+        best_val_rmse = val_rmse
+        if cfg.training.save_checkpoint:
+            torch.save({'model_state_dict': model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
+        print(f"  -> New Best Val RMSE: {best_val_rmse:.4f}")
+
+    log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})
+    with open(cfg.paths.save_dir, 'w') as f: json.dump(log, f)
+
+===== C:\Code\AISE\src\utils\adam.py =====
+import math
+import torch
+from torch import Tensor
+from typing import List, Optional
+from torch.optim.optimizer import Optimizer
+
+
+def adam(params: List[Tensor],
+         grads: List[Tensor],
+         exp_avgs: List[Tensor],
+         exp_avg_sqs: List[Tensor],
+         max_exp_avg_sqs: List[Tensor],
+         state_steps: List[int],
+         *,
+         amsgrad: bool,
+         beta1: float,
+         beta2: float,
+         lr: float,
+         weight_decay: float,
+         eps: float):
+    r"""Functional API that performs Adam algorithm computation.
+    See :class:`~torch.optim.Adam` for details.
+    """
+
+    for i, param in enumerate(params):
+
+        grad = grads[i]
+        exp_avg = exp_avgs[i]
+        exp_avg_sq = exp_avg_sqs[i]
+        step = state_steps[i]
+
+        bias_correction1 = 1 - beta1 ** step
+        bias_correction2 = 1 - beta2 ** step
+
+        if weight_decay != 0:
+            grad = grad.add(param, alpha=weight_decay)
+
+        # Decay the first and second moment running average coefficient
+        exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+        exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+        if amsgrad:
+            # Maintains the maximum of all 2nd moment running avg. till now
+            torch.maximum(max_exp_avg_sqs[i], exp_avg_sq, out=max_exp_avg_sqs[i])
+            # Use the max. for normalizing running avg. of gradient
+            denom = (max_exp_avg_sqs[i].sqrt() / math.sqrt(bias_correction2)).add_(eps)
+        else:
+            denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+
+        step_size = lr / bias_correction1
+
+        param.addcdiv_(exp_avg, denom, value=-step_size)
+
+
+class Adam(Optimizer):
+    r"""Implements Adam algorithm.
+    It has been proposed in `Adam: A Method for Stochastic Optimization`_.
+    The implementation of the L2 penalty follows changes proposed in
+    `Decoupled Weight Decay Regularization`_.
+    Args:
+        params (iterable): iterable of parameters to optimize or dicts defining
+            parameter groups
+        lr (float, optional): learning rate (default: 1e-3)
+        betas (Tuple[float, float], optional): coefficients used for computing
+            running averages of gradient and its square (default: (0.9, 0.999))
+        eps (float, optional): term added to the denominator to improve
+            numerical stability (default: 1e-8)
+        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
+        amsgrad (boolean, optional): whether to use the AMSGrad variant of this
+            algorithm from the paper `On the Convergence of Adam and Beyond`_
+            (default: False)
+    .. _Adam\: A Method for Stochastic Optimization:
+        https://arxiv.org/abs/1412.6980
+    .. _Decoupled Weight Decay Regularization:
+        https://arxiv.org/abs/1711.05101
+    .. _On the Convergence of Adam and Beyond:
+        https://openreview.net/forum?id=ryQu7f-RZ
+    """
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=0, amsgrad=False):
+        if not 0.0 <= lr:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        if not 0.0 <= eps:
+            raise ValueError("Invalid epsilon value: {}".format(eps))
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+        if not 0.0 <= weight_decay:
+            raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay, amsgrad=amsgrad)
+        super(Adam, self).__init__(params, defaults)
+
+    def __setstate__(self, state):
+        super(Adam, self).__setstate__(state)
+        for group in self.param_groups:
+            group.setdefault('amsgrad', False)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """Performs a single optimization step.
+        Args:
+            closure (callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            params_with_grad = []
+            grads = []
+            exp_avgs = []
+            exp_avg_sqs = []
+            max_exp_avg_sqs = []
+            state_steps = []
+            beta1, beta2 = group['betas']
+
+            for p in group['params']:
+                if p.grad is not None:
+                    params_with_grad.append(p)
+                    if p.grad.is_sparse:
+                        raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
+                    grads.append(p.grad)
+
+                    state = self.state[p]
+                    # Lazy state initialization
+                    if len(state) == 0:
+                        state['step'] = 0
+                        # Exponential moving average of gradient values
+                        state['exp_avg'] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                        # Exponential moving average of squared gradient values
+                        state['exp_avg_sq'] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                        if group['amsgrad']:
+                            # Maintains max of all exp. moving avg. of sq. grad. values
+                            state['max_exp_avg_sq'] = torch.zeros_like(p, memory_format=torch.preserve_format)
+
+                    exp_avgs.append(state['exp_avg'])
+                    exp_avg_sqs.append(state['exp_avg_sq'])
+
+                    if group['amsgrad']:
+                        max_exp_avg_sqs.append(state['max_exp_avg_sq'])
+
+                    # update the steps for each param group update
+                    state['step'] += 1
+                    # record the step after step update
+                    state_steps.append(state['step'])
+
+            adam(params_with_grad,
+                 grads,
+                 exp_avgs,
+                 exp_avg_sqs,
+                 max_exp_avg_sqs,
+                 state_steps,
+                 amsgrad=group['amsgrad'],
+                 beta1=beta1,
+                 beta2=beta2,
+                 lr=group['lr'],
+                 weight_decay=group['weight_decay'],
+                 eps=group['eps'])
+        return loss
+
+===== C:\Code\AISE\src\utils\config.py =====
+import yaml
+from types import SimpleNamespace
+
+def load_config(path):
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+
+    def to_ns(d):
+        for k,v in d.items():
+            if isinstance(v, dict):
+                d[k] = to_ns(v)
+        return SimpleNamespace(**d)
+
+    return to_ns(cfg)
+
+
+===== C:\Code\AISE\src\utils\metrics.py =====
+import numpy as np
+
+
+def rmse(actual, pred, dim=(1,2)):
+    error = actual - pred
+    return np.sqrt(np.nanmean(error**2, axis=dim))
+
+
+def mfb(actual, pred, dim=(1,2)):
+    error = (pred - actual)/(pred + actual)
+    error = np.where(np.isfinite(error), error, np.nan)
+    return 2 * np.nanmean(error,axis=dim)
+
+
+def smape(actual, pred, dim=(1,2)):
+    error = np.abs((actual - pred) / (actual+pred))
+    error = np.where(np.isfinite(error), error, np.nan) 
+    return 200 * np.nanmean(error, axis=dim)
+
+
+
+===== C:\Code\AISE\src\utils\utilities3.py =====
+import torch
+import numpy as np
+import torch.nn as nn
+
+import operator
+from functools import reduce
+
+#################################################
+# Utilities
+#################################################
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+# loss function with rel/abs Lp loss
+class LpLoss(object):
+    def __init__(self, d=2, p=2, size_average=True, reduction=True):
+        super(LpLoss, self).__init__()
+
+        # Dimension and Lp-norm type are postive
+        assert d > 0 and p > 0
+
+        self.d = d
+        self.p = p
+        self.reduction = reduction
+        self.size_average = size_average
+
+    def abs(self, x, y):
+        num_examples = x.size()[0]
+
+        # Assume uniform mesh
+        h = 1.0 / (x.size()[1] - 1.0)
+
+        all_norms = (h ** (self.d / self.p)) * torch.norm(x.reshape(num_examples, -1) - y.reshape(num_examples, -1),
+                                                          self.p, 1)
+
+        if self.reduction:
+            if self.size_average:
+                return torch.mean(all_norms)
+            else:
+                return torch.sum(all_norms)
+
+        return all_norms
+
+    def rel(self, x, y):
+        num_examples = x.size()[0]
+
+        diff_norms = torch.norm(x.reshape(num_examples, -1) - y.reshape(num_examples, -1), self.p, 1)
+        y_norms = torch.norm(y.reshape(num_examples, -1), self.p, 1)
+
+        if self.reduction:
+            if self.size_average:
+                return torch.mean(diff_norms / y_norms)
+            else:
+                return torch.sum(diff_norms / y_norms)
+
+        return diff_norms / y_norms
+
+    def __call__(self, x, y):
+        return self.rel(x, y)
+
+===== C:\Code\AISE\src\utils\__init__.py =====
+
+===== C:\Code\AISE\src\__init__.py =====
+

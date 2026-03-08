@@ -18,28 +18,23 @@ data:
   S2: 124
 
 features:
-  V: 16
+  V: 20
   met_variables:
-    ["cpm25", "q2", "t2", "u10", "swdown", "pblh", "v10", "psfc", "rain"]
+    ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "psfc", "rain"]
   emission_variables:
-    - "PM25"
-    - "NH3"
-    - "SO2"
-    - "NOx"
-    - "NMVOC_e"
-    - "NMVOC_finn"
-    - "bio"
+    ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
 
 model:
-  modes: 12
-  width: 64
+  modes: 8
+  width: 192
 
 training:
   batch_size: 6
-  epochs: 30
+  epochs: 60
   lr: 1e-3
-  weight_decay: 1e-4
-  scheduler_step: 30
+  weight_decay: 1e-5
+  scheduler_step: 60
   scheduler_gamma: 0.5
   checkpoint_every: 10
   save_checkpoint: True # Set to True to save the .pt file
