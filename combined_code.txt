@@ -317,30 +317,13 @@ class TestDataLoader(torch.utils.data.Dataset):
             path = os.path.join(cfg_infer.paths.input_loc, f"{feat}.npy")
             self.arrs[feat] = np.load(path, mmap_mode="r")
 
-        # Load Time Array for Diurnal Features
-        time_path = os.path.join(cfg_infer.paths.input_loc, "time.npy")
-        if os.path.exists(time_path):
-            self.time_arr = np.load(time_path)
-        else:
-            raise FileNotFoundError("time.npy not found in test_in! Diurnal features cannot be built.")
-
         self.N = self.arrs[self.raw_features[0]].shape[0]
 
     def __len__(self):
         return self.N
 
     def __getitem__(self, idx):
-        # 1. Extract Diurnal Features for this sample
-        t_sample = self.time_arr[idx, :self.total_time]
-        t_str = [t.decode('utf-8').replace('_', ' ') if isinstance(t, bytes) else str(t).replace('_', ' ') for t in t_sample]
-        hours = pd.to_datetime(t_str).hour.values
-        
-        sin_h = np.sin(2 * np.pi * hours / 24.0).astype(np.float32)
-        cos_h = np.cos(2 * np.pi * hours / 24.0).astype(np.float32)
-        sin_h = np.broadcast_to(sin_h[:, None, None], (self.total_time, self.S1, self.S2))
-        cos_h = np.broadcast_to(cos_h[:, None, None], (self.total_time, self.S1, self.S2))
-
-        # 2. Extract Raw Sequence Data
+        # 1. Extract Raw Sequence Data
         seq_raw = {}
         for feat in self.raw_features:
             if feat == "cpm25":
@@ -348,17 +331,17 @@ class TestDataLoader(torch.utils.data.Dataset):
             else:
                 seq_raw[feat] = np.array(self.arrs[feat][idx, :self.total_time], dtype=np.float32)
                 
-        # 3. Compute Derived Features on the fly
+        # 2. Compute Derived Features on the fly
         ws = np.sqrt(seq_raw['u10']**2 + seq_raw['v10']**2)
         vc = np.log1p(ws * seq_raw['pblh']) # Log transform applied immediately
         rm = (seq_raw['rain'] > 0).astype(np.float32)
         
-        # 4. Apply Log Transforms to Skewed Raw Data
+        # 3. Apply Log Transforms to Skewed Raw Data
         skewed_features = ['rain', 'bio', 'NMVOC_finn']
         for feat in skewed_features:
             seq_raw[feat] = np.log1p(seq_raw[feat])
 
-        # 5. Normalize and Separate PM2.5 from Weather
+        # 4. Normalize and Separate PM2.5 from Weather
         pm25_hist = None
         weather_feats_list = []
         
@@ -379,20 +362,17 @@ class TestDataLoader(torch.utils.data.Dataset):
             else:
                 weather_feats_list.append(arr)
 
-        # 6. Append Topography Map
+        # 5. Append Topography Map
         topo_time = np.broadcast_to(self.topo_proxy[None, :, :], (self.total_time, self.S1, self.S2))
         weather_feats_list.append(topo_time)
 
-        # 7. Append Diurnal waves and stack
-        weather_feats_list.append(sin_h)
-        weather_feats_list.append(cos_h)
-        
+        # 6. Stack weather features
         weather_stack = np.stack(weather_feats_list, axis=0)
         
-        # Reshape to (140, 124, Channels * Time) -> (140, 124, 21 * 26 = 546)
+        # Reshape to (140, 124, Channels * Time) -> (140, 124, 19 * 26 = 494)
         weather_tensor = torch.from_numpy(weather_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
-        # Combine PM2.5 (10) + Weather (546) = 556 Channels
+        # Combine PM2.5 (10) + Weather (494) = 504 Channels
         x = torch.cat((pm25_hist, weather_tensor), dim=-1)
 
         return x
@@ -403,7 +383,7 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # ==========================================
 # 3. MODEL INITIALIZATION
 # ==========================================
-weather_channels = (cfg_train.features.V - 1 + 2) # 20 raw/derived - 1 pm25 + 2 diurnal
+weather_channels = (cfg_train.features.V - 1) # 20 raw/derived - 1 pm25
 in_channels = cfg_train.data.time_input + (weather_channels * cfg_train.data.total_time)
 
 print(f"Building WNO Model with {in_channels} input channels...")
@@ -550,28 +530,12 @@ def process_month(month_name):
         month_data.append(arr)
 
     # 2. Add Static Topography Proxy
-    time_path = os.path.join(RAW_PATH, month_name, "time.npy")
-    time_arr = np.load(time_path)
-    total_hours = len(time_arr)
+    # Get total hours from the first feature array since we no longer load time.npy
+    total_hours = month_data[0].shape[0] 
     
     # Broadcast the 2D topo map across the time dimension
     topo_time = np.broadcast_to(topo_proxy[None, :, :], (total_hours, 140, 124))
     month_data.append(topo_time)
-
-    time_str = [
-        t.decode("utf-8").replace("_", " ") if isinstance(t, bytes) else str(t).replace("_", " ")
-        for t in time_arr
-    ]
-    hours = pd.to_datetime(time_str).hour.values
-
-    sin_h = np.sin(2 * np.pi * hours / 24.0).astype(np.float32)
-    cos_h = np.cos(2 * np.pi * hours / 24.0).astype(np.float32)
-
-    sin_h = np.broadcast_to(sin_h[:, None, None], (len(hours), 140, 124))
-    cos_h = np.broadcast_to(cos_h[:, None, None], (len(hours), 140, 124))
-
-    month_data.append(sin_h)
-    month_data.append(cos_h)
 
     combined = np.stack(month_data, axis=-1)
 
@@ -744,7 +708,7 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # ==========================================
 # 4. MODEL & OPTIMIZER
 # ==========================================
-weather_channels = (cfg.features.V - 1 + 2)
+weather_channels = (cfg.features.V - 1)  # Removed the + 2 diurnal channels
 in_channels = cfg.data.time_input + (weather_channels * cfg.data.total_time)
 
 model = FNO2D(

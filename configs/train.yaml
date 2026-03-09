@@ -7,6 +7,9 @@ paths:
   min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
   save_dir: /kaggle/working/experiments/baseline/logs/log.json
   model_save_path: /kaggle/working/experiments/baseline/checkpoints/fno_baseline.pt
+  paths:
+  # ... your existing paths ...
+  stats_path: /kaggle/working/grid_robust_stats.npy
 
 data:
   ntrain: 2112
@@ -16,10 +19,9 @@ data:
   time_out: 16
   S1: 140
   S2: 124
-  stride: 1
+  stride: 4
 
 features:
-  V: 20
   met_variables:
     ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "psfc", "rain"]
   emission_variables:
@@ -28,7 +30,7 @@ features:
 
 model:
   modes: 8
-  width: 192
+  width: 128
 
 training:
   batch_size: 6

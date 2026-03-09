@@ -5,7 +5,9 @@ paths:
   input_loc: /kaggle/input/competitions/aisehack-theme-2/test_in/
   checkpoint: /kaggle/working/experiments/baseline/checkpoints/fno_baseline_best.pt
   output_loc: /kaggle/working/
-  min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
+  paths:
+  # ... your existing paths ...
+  stats_path: /kaggle/working/grid_robust_stats.npy
 
 data:
   dataset: test_in
