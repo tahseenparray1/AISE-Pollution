@@ -17,7 +17,8 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 S1, S2 = cfg.data.S1, cfg.data.S2
-
+os.makedirs(os.path.dirname(cfg.paths.save_dir), exist_ok=True)
+os.makedirs(os.path.dirname(cfg.paths.model_save_path), exist_ok=True)
 print("Loading robust grid-wise stats...")
 stats = np.load(cfg.paths.stats_path, allow_pickle=True).item()
 
