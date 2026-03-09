@@ -6,9 +6,8 @@ paths:
   savepath_val: /kaggle/temp/data/val/
   min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
   save_dir: /kaggle/working/experiments/baseline/logs/log.json
-  model_save_path: /kaggle/working/experiments/baseline/checkpoints/fno_baseline.pt
+  model_save_path: /kaggle/working/fno_baseline.pt
   paths:
-  # ... your existing paths ...
   stats_path: /kaggle/working/grid_robust_stats.npy
 
 data:
