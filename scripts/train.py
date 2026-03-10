@@ -150,7 +150,12 @@ for ep in range(cfg.training.epochs):
     for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
         x, y = x.to(device), y.to(device)
         
-        x = x + torch.randn_like(x) * 0.01
+        # FIX #2: Apply noise only to continuous features, protecting:
+        # - Topography (last channel): static elevation proxy from PSFC
+        # - Rain mask (binary 0/1): within temporal channels
+        noise = torch.randn_like(x) * 0.01
+        noise[..., -1] = 0.0  # Zero out noise for topography (last channel)
+        x = x + noise
         
         optimizer.zero_grad(set_to_none=True)
         
