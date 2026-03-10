@@ -22,6 +22,7 @@ np.random.seed(0)
 
 S1, S2 = cfg.data.S1, cfg.data.S2
 os.makedirs(cfg.paths.model_save_path, exist_ok=True)
+os.makedirs(cfg.paths.save_dir, exist_ok=True)
 
 # ==========================================
 # 2. STATS & LOSS UTILITIES
