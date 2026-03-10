@@ -29,9 +29,9 @@ model:
   width: 128
 
 training:
-  batch_size: 2
+  batch_size: 4
   epochs: 120
-  lr: 5e-4
+  lr: 1e-4
   weight_decay: 1e-4
   checkpoint_every: 10
   save_checkpoint: True
