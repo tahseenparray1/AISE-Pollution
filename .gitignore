@@ -21,3 +21,4 @@
 *.parquet
 *.feather
 *.DS_Store
+*.zip
