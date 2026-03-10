@@ -150,11 +150,15 @@ for ep in range(cfg.training.epochs):
     for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
         x, y = x.to(device), y.to(device)
         
-        # FIX #2: Apply noise only to continuous features, protecting:
+        # FIX: Apply noise only to continuous features, protecting:
         # - Topography (last channel): static elevation proxy from PSFC
-        # - Rain mask (binary 0/1): within temporal channels
+        # - Rain mask (feature index 9 within temporal block): binary 0/1
         noise = torch.randn_like(x) * 0.01
         noise[..., -1] = 0.0  # Zero out noise for topography (last channel)
+        # Zero out noise for rain_mask at every timestep in the temporal block
+        for t in range(26):
+            rain_mask_idx = 10 + (t * 10) + 9
+            noise[..., rain_mask_idx] = 0.0
         x = x + noise
         
         optimizer.zero_grad(set_to_none=True)
