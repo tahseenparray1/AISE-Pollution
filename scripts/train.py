@@ -93,8 +93,8 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
 train_ds = FastInMemoryDataset("train", cfg)
 val_ds = FastInMemoryDataset("val", cfg)
 
-train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=2, pin_memory=True)
-val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=6, pin_memory=True)
+val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=6, pin_memory=True)
 
 # ==========================================
 # 4. MODEL & OPTIMIZER
