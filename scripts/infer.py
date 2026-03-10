@@ -144,7 +144,8 @@ model = FNO2D(
     in_channels=in_channels,
     time_out=cfg_train.data.time_out,
     width=cfg_train.model.width,
-    modes=cfg_train.model.modes
+    modes=cfg_train.model.modes,
+    time_input=cfg_train.data.time_input
 ).to(device)
 
 checkpoint_path = cfg_train.paths.model_save_path.replace(".pt", "_best.pt")

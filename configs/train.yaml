@@ -4,7 +4,6 @@ experiment:
 paths:
   savepath_train: /kaggle/temp/data/train/
   savepath_val: /kaggle/temp/data/val/
-  min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
   save_dir: /kaggle/working/log.json
   model_save_path: /kaggle/working/fno_baseline.pt
   stats_path: /kaggle/working/grid_robust_stats.npy
@@ -34,8 +33,6 @@ training:
   epochs: 100
   lr: 1e-3
   weight_decay: 1e-5
-  scheduler_step: 60
-  scheduler_gamma: 0.5
   checkpoint_every: 10
   save_checkpoint: True
   early_stopping: False

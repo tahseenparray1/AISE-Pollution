@@ -76,10 +76,11 @@ class WNOBlock(nn.Module):
 
 class FNO2D(nn.Module):
     # Renamed internal structure to WNO, kept class name FNO2D to prevent breaking your train.py imports!
-    def __init__(self, in_channels, time_out=16, width=64, modes=None):
+    def __init__(self, in_channels, time_out=16, width=64, modes=None, time_input=10):
         super().__init__()
         self.width = width
         self.time_out = time_out
+        self.time_input = time_input  # Number of PM2.5 history hours (for residual connection)
         
         # Encode ablated input down to 'width'
         self.input_encoder = nn.Sequential(
@@ -107,7 +108,7 @@ class FNO2D(nn.Module):
 
     def forward(self, x):
         b, nx, ny, _ = x.shape
-        last_pm25 = x[..., 9:10].permute(0, 3, 1, 2) 
+        last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2) 
         
         x_in = x.permute(0, 3, 1, 2)
         grid = self.get_grid(b, nx, ny, x.device) 
