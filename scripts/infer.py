@@ -85,7 +85,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         seq_raw['rain_mask'] = rm
         
         # 3. Apply Log Transforms
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh']
+        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh', 'PM25', 'NH3', 'SO2', 'NOx', 'NMVOC_e']
         for feat in skewed_features:
             seq_raw[feat] = np.log1p(seq_raw[feat])
 

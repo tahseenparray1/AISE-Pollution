@@ -150,15 +150,12 @@ for ep in range(cfg.training.epochs):
     for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
         x, y = x.to(device), y.to(device)
         
-        # FIX: Apply noise only to continuous features, protecting:
-        # - Topography (last channel): static elevation proxy from PSFC
-        # - Rain mask (feature index 9 within temporal block): binary 0/1
+        # Noise augmentation: protect static & binary channels
         noise = torch.randn_like(x) * 0.01
-        noise[..., -1] = 0.0  # Zero out noise for topography (last channel)
-        # Zero out noise for rain_mask at every timestep in the temporal block
-        for t in range(26):
-            rain_mask_idx = 10 + (t * 10) + 9
-            noise[..., rain_mask_idx] = 0.0
+        noise[..., -1] = 0.0  # Topography (last channel)
+        # Vectorized rain_mask protection: feature index 9 in each of 26 timesteps
+        rain_mask_indices = torch.arange(26, device=x.device) * 10 + 10 + 9
+        noise[..., rain_mask_indices] = 0.0
         x = x + noise
         
         optimizer.zero_grad(set_to_none=True)
@@ -232,3 +229,12 @@ for ep in range(cfg.training.epochs):
 
     log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})
     with open(cfg.paths.save_dir, 'w') as f: json.dump(log, f)
+
+# Finalize SWA batch normalization statistics
+print("Finalizing SWA batch norm statistics...")
+torch.optim.swa_utils.update_bn(train_loader, swa_model, device=device)
+
+# Save final SWA model
+if cfg.training.save_checkpoint:
+    torch.save({'model_state_dict': swa_model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
+    print(f"Final SWA model saved. Best Val RMSE: {best_val_rmse:.4f}")
