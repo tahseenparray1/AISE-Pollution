@@ -18,7 +18,7 @@ data:
   time_out: 16
   S1: 140
   S2: 124
-  stride: 4
+  stride: 3
 
 features:
   V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
@@ -33,7 +33,7 @@ model:
 
 training:
   batch_size: 16
-  epochs: 80
+  epochs: 100
   lr: 1e-3
   weight_decay: 1e-5
   scheduler_step: 60
