@@ -260,7 +260,7 @@ class FNO2D(nn.Module):
             nn.Conv2d(in_channels + 2, width, kernel_size=1),  # +2 for spatial grid
             nn.GroupNorm(4, width),
             nn.GELU(),
-            nn.Dropout(p=0.05)
+            nn.Dropout(p=0.15)
         )
         
         self.block0 = WNOBlock(self.width)

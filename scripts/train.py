@@ -173,7 +173,7 @@ for ep in range(cfg.training.epochs):
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
         # 3. Blended Total Loss
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = huber_loss + 0.05 * loss_grad
 
         
         with torch.no_grad():

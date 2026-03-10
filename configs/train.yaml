@@ -26,13 +26,13 @@ features:
 
 model:
   modes: 8
-  width: 256
+  width: 128
 
 training:
   batch_size: 16
-  epochs: 100
-  lr: 1e-3
-  weight_decay: 1e-5
+  epochs: 80
+  lr: 5e-4
+  weight_decay: 1e-3
   checkpoint_every: 10
   save_checkpoint: True
   early_stopping: False

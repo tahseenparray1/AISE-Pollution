@@ -55,7 +55,7 @@ features:
 
 model:
   modes: 8
-  width: 256
+  width: 128
 
 
 ================================================================================
@@ -90,13 +90,13 @@ features:
 
 model:
   modes: 8
-  width: 256
+  width: 128
 
 training:
   batch_size: 16
-  epochs: 100
-  lr: 1e-3
-  weight_decay: 1e-5
+  epochs: 80
+  lr: 5e-4
+  weight_decay: 1e-3
   checkpoint_every: 10
   save_checkpoint: True
   early_stopping: False
@@ -374,7 +374,7 @@ class FNO2D(nn.Module):
             nn.Conv2d(in_channels + 2, width, kernel_size=1),  # +2 for spatial grid
             nn.GroupNorm(4, width),
             nn.GELU(),
-            nn.Dropout(p=0.05)
+            nn.Dropout(p=0.15)
         )
         
         self.block0 = WNOBlock(self.width)
@@ -666,7 +666,7 @@ for ep in range(cfg.training.epochs):
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
         # 3. Blended Total Loss
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = huber_loss + 0.05 * loss_grad
 
         
         with torch.no_grad():
