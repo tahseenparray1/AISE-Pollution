@@ -7,7 +7,6 @@ paths:
   min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
   save_dir: /kaggle/working/experiments/baseline/logs/log.json
   model_save_path: /kaggle/working/checkpoints/fno_baseline.pt
-  paths:
   stats_path: /kaggle/working/grid_robust_stats.npy
 
 data:
@@ -21,8 +20,8 @@ data:
   stride: 4
 
 features:
-  met_variables:
-    ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "psfc", "rain"]
+  V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
+  met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"] # psfc removed
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
   derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
@@ -32,12 +31,12 @@ model:
   width: 128
 
 training:
-  batch_size: 6
-  epochs: 60
+  batch_size: 16
+  epochs: 80
   lr: 1e-3
   weight_decay: 1e-5
   scheduler_step: 60
   scheduler_gamma: 0.5
   checkpoint_every: 10
-  save_checkpoint: True # Set to True to save the .pt file
-  early_stopping: True # Set to True to enable early stopping
+  save_checkpoint: True
+  early_stopping: False

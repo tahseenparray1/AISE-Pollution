@@ -18,8 +18,10 @@ def load_raw_or_derived(feat, month):
     elif feat == 'vent_coef':
         u = np.load(os.path.join(RAW_PATH, month, "u10.npy")).astype(np.float32)
         v = np.load(os.path.join(RAW_PATH, month, "v10.npy")).astype(np.float32)
+        ws = np.sqrt(u**2 + v**2)
         pblh = np.load(os.path.join(RAW_PATH, month, "pblh.npy")).astype(np.float32)
-        return np.log1p(np.sqrt(u**2 + v**2) * pblh)
+        vc = ws * pblh
+        return np.log1p(vc)
         
     elif feat == 'rain_mask':
         rain = np.load(os.path.join(RAW_PATH, month, "rain.npy")).astype(np.float32)
@@ -28,8 +30,8 @@ def load_raw_or_derived(feat, month):
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         
-        # 🚀 THE SILVER BULLET: Target Variable (cpm25) is now log-transformed!
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh', 'cpm25'] 
+        # --- THE FIX: pblh added to log transform to compress diurnal variance ---
+        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh'] 
         if feat in skewed_features:
             arr = np.log1p(arr)
             
@@ -53,7 +55,7 @@ def compute_gridwise_robust_stats(features, months):
 
 global_stats = compute_gridwise_robust_stats(all_features, cfg.data.months)
 
-# Generate Topography from PSFC
+# Generate Topography from PSFC (Loaded explicitly just for this)
 print("Generating Topography Map...")
 all_psfc = np.concatenate([np.load(os.path.join(RAW_PATH, m, "psfc.npy")).astype(np.float32) for m in cfg.data.months], axis=0)
 psfc_median = np.median(all_psfc, axis=0)

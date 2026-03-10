@@ -33,4 +33,4 @@ features:
 
 model:
   modes: 8
-  width: 192
+  width: 128

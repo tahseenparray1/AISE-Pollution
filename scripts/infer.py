@@ -23,7 +23,7 @@ print(f"Using device: {device}")
 
 # Load Grid-Wise Robust Stats 
 print("Loading grid-wise normalization stats...")
-stats_path = cfg.paths.stats_path
+stats_path = cfg_infer.paths.stats_path
 stats = np.load(stats_path, allow_pickle=True).item()
 
 pm_median = stats['cpm25']['median'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 1)
@@ -35,7 +35,7 @@ def denorm(x):
 # Compute Static Topography Proxy using training stats
 # Note: Since psfc isn't in train.yaml features anymore, we load it directly from test_in just for this map
 psfc_test = np.load(os.path.join(cfg_infer.paths.input_loc, "psfc.npy"))
-psfc_median = np.median(psfc_test, axis=(0, 1)) # <-- FIX: Median over BOTH sample and time dimensions
+psfc_median = np.median(psfc_test, axis=1) # Median over time dimension
 topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
 
 # ==========================================
