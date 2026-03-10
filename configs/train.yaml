@@ -6,19 +6,17 @@ paths:
   savepath_val: /kaggle/temp/data/val/
   min_max_file: /kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat
   save_dir: /kaggle/working/log.json
-  model_save_path: /kaggle/working/checkpoints/fno_baseline.pt
+  model_save_path: /kaggle/working/fno_baseline.pt
   stats_path: /kaggle/working/grid_robust_stats.npy
   topo_path: /kaggle/working/topo_proxy.npy
 
 data:
-  ntrain: 2112
-  ntest: 528
-  total_time: 26
   time_input: 10
   time_out: 16
   S1: 140
   S2: 124
-  stride: 3
+  total_time: 26
+  stride: 4
 
 features:
   V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
@@ -29,7 +27,7 @@ features:
 
 model:
   modes: 8
-  width: 128
+  width: 256
 
 training:
   batch_size: 16

@@ -21,8 +21,6 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 S1, S2 = cfg.data.S1, cfg.data.S2
-os.makedirs(cfg.paths.model_save_path, exist_ok=True)
-
 
 # ==========================================
 # 2. STATS & LOSS UTILITIES
@@ -150,14 +148,13 @@ for ep in range(cfg.training.epochs):
         
         # --- NEW LOSS FORMULATION ---
         # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-        mse_loss = torch.mean((pred_phys - targ_phys) ** 2)
-        rmse_loss = torch.sqrt(mse_loss + 1e-8) # 1e-8 prevents NaN gradients at 0
+        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
         
         # 2. Spatial Gradient Loss (Keeps plume edges sharp)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
         # 3. Blended Total Loss
-        total_loss = rmse_loss  + 0.1 * loss_grad
+        total_loss = huber_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():

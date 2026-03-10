@@ -11,7 +11,6 @@ paths:
 data:
   dataset: test_in
   ntest: 996
-  total_time: 26
   time_input: 10
   time_out: 16
   S1: 140
@@ -20,16 +19,10 @@ data:
 features:
   V: 16
   met_variables:
-    ["cpm25", "q2", "t2", "u10", "swdown", "pblh", "v10", "psfc", "rain"]
+    ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "psfc", "rain"]
   emission_variables:
-    - "PM25"
-    - "NH3"
-    - "SO2"
-    - "NOx"
-    - "NMVOC_e"
-    - "NMVOC_finn"
-    - "bio"
+    ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
 
 model:
-  modes: 8
-  width: 128
+  modes: 12
+  width: 256

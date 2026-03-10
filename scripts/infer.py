@@ -32,8 +32,11 @@ pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 
 def denorm(x):
     return (x * pm_iqr) + pm_median
 
-print(f"Loading static topography map from: {cfg_infer.paths.topo_path}")
-topo_proxy = np.load(cfg_infer.paths.topo_path)
+# Compute Static Topography Proxy using training stats
+# Note: Since psfc isn't in train.yaml features anymore, we load it directly from test_in just for this map
+psfc_test = np.load(os.path.join(cfg_infer.paths.input_loc, "psfc.npy"))
+psfc_median = np.median(psfc_test, axis=1) # Median over time dimension
+topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
 
 # ==========================================
 # 2. DATA LOADER (PHASE 1 ALIGNED)
