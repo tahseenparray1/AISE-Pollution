@@ -134,7 +134,7 @@ class FNO2D(nn.Module):
         gridy = torch.linspace(0, 1, ny, device=device)
         gridx = gridx.view(1, 1, nx, 1).repeat(b, 1, 1, ny)
         gridy = gridy.view(1, 1, 1, ny).repeat(b, 1, nx, 1)
-        return torch.cat((gridx, gridy), dim=1).permute(0, 3, 1, 2)
+        return torch.cat((gridx, gridy), dim=1)
 
     def forward(self, x):
         b, nx, ny, _ = x.shape
