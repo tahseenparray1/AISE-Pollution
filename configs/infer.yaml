@@ -5,9 +5,8 @@ paths:
   input_loc: /kaggle/input/competitions/aisehack-theme-2/test_in/
   checkpoint: /kaggle/working/experiments/baseline/checkpoints/fno_baseline_best.pt
   output_loc: /kaggle/working/
-  paths:
-  # ... your existing paths ...
   stats_path: /kaggle/working/grid_robust_stats.npy
+  topo_path: /kaggle/working/topo_proxy.npy
 
 data:
   dataset: test_in

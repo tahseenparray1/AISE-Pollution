@@ -8,6 +8,7 @@ paths:
   save_dir: /kaggle/working/log.json
   model_save_path: /kaggle/working/checkpoints/fno_baseline.pt
   stats_path: /kaggle/working/grid_robust_stats.npy
+  topo_path: /kaggle/working/topo_proxy.npy
 
 data:
   ntrain: 2112
