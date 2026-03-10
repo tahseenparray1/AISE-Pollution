@@ -2,8 +2,7 @@ paths:
   raw_path: /kaggle/input/competitions/aisehack-theme-2/raw/
   train_savepath: /kaggle/temp/data/train/
   val_savepath: /kaggle/temp/data/val/
-  paths:
-  # ... your existing paths ...
+  topo_path: /kaggle/working/topo_proxy.npy
   stats_path: /kaggle/working/grid_robust_stats.npy
 
 data:
