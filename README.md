@@ -47,12 +47,10 @@ The workflow is organized into **three sequential stages**:
 
 ## Using This Repository with Kaggle
 
-- This repository is designed to be used **as a Kaggle dataset**, not run directly on local machines.
-
-### Recommended Setup
+### Option A — Quick start (no GitHub push needed)
 
 1. Upload this repository as a **Kaggle Dataset**
-2. Open the provided **baseline Kaggle notebook**: **[Link](https://www.kaggle.com/code/siddharthandileep/baseline-run-aisehack-test/)**, Copy and Edit the same.
+2. Open the provided **baseline Kaggle notebook**: **[Link](https://www.kaggle.com/code/siddharthandileep/baseline-run-aisehack-test/)**, Copy and Edit it.
 3. Add:
    - This repository (as a dataset)
    - The official competition dataset
@@ -63,6 +61,79 @@ The execution will emulate the baseline run:
 - Read scripts and configs from this repository
 - Execute dataset preparation, training, and inference
 - Produce the final `preds.npy` submission file
+
+---
+
+### Option B — Clone from GitHub, run on Kaggle, and push changes back
+
+This workflow lets you **edit code on Kaggle and save your changes permanently to GitHub**.  
+A ready-made notebook is provided at [`notebooks/kaggle_baseline.ipynb`](notebooks/kaggle_baseline.ipynb).
+
+#### One-time setup
+
+1. **Fork** this repository to your own GitHub account.
+
+2. **Create a GitHub Personal Access Token (PAT)**
+   - Go to **GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens**
+   - Click **Generate new token**
+   - Set *Repository access* to your fork
+   - Grant **Contents: Read and Write** permission
+   - Copy the generated token
+
+3. **Add the token as a Kaggle secret**
+   - Open any Kaggle notebook
+   - Click **Add-ons → Secrets → Add a new secret**
+   - Name: `GITHUB_TOKEN`, Value: (paste the token)
+   - Make sure **Internet** is turned **On** for the notebook
+
+#### Running the notebook
+
+1. Open a new Kaggle notebook (or import `notebooks/kaggle_baseline.ipynb` directly).
+2. Add the **competition dataset** (`aisehack-theme-2`) via *Add data*.
+3. Set the accelerator to **GPU P100**.
+4. In the first code cell, set your `GITHUB_USERNAME` and `GITHUB_REPO`.
+5. Run all cells sequentially:
+   | Cell | Action |
+   |------|--------|
+   | Step 1 | Clones your GitHub fork into `/kaggle/working/<repo>` |
+   | Step 2 | Adds the repo to `sys.path` |
+   | Step 3 | Installs dependencies |
+   | Step 4 | Runs `prepare_dataset.py` |
+   | Step 5 | Runs `train.py` |
+   | Step 6 | Runs `infer.py` → saves `preds.npy` |
+   | Step 7 | *(Optional)* Commits & pushes your changes back to GitHub |
+
+#### Pushing changes to GitHub (Step 7)
+
+After you have modified any file (e.g. a config, script, or the notebook itself):
+
+```python
+# Stage changed tracked files
+git("add -u")
+
+# Or stage a specific file
+git("add configs/train.yaml")
+
+# Commit
+git('commit -m "your commit message"')
+
+# Push
+git(f"push origin {GITHUB_BRANCH}")
+```
+
+All `git` calls run inside the cloned repo directory, authenticated with your PAT.  
+The token is read from the Kaggle secret and is **never printed** to cell output.
+
+#### Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `Secret 'GITHUB_TOKEN' not found` | Add the secret via *Add-ons → Secrets* and enable **Internet** |
+| `git push` returns 403 | PAT lacks *Contents: Write* permission or has expired — regenerate it |
+| `git push` returns 401 | Wrong username / token combination |
+| `prepare_dataset.py` file-not-found | Competition dataset is not mounted — add it via *Add data* |
+| CUDA out-of-memory | Reduce `batch_size` in `configs/train.yaml` |
+| Session time-out before training ends | Lower `epochs` or resume from the last saved checkpoint |
 
 ---
 
