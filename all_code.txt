@@ -206,14 +206,13 @@ class PhysicsPDECell(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # Fixed finite-difference filters (non-trainable)
+        # Fused PDE filters: stack Sobel-X, Sobel-Y, Laplacian into single (3,1,3,3) tensor
+        # This computes all 3 spatial derivatives in ONE conv2d call (saves 32 kernel launches/sample)
         sobel_x = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]]) / 8.0
         sobel_y = torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]]) / 8.0
         laplacian = torch.tensor([[0., 1., 0.], [1., -4., 1.], [0., 1., 0.]])
-
-        self.register_buffer('sobel_x', sobel_x.view(1, 1, 3, 3))
-        self.register_buffer('sobel_y', sobel_y.view(1, 1, 3, 3))
-        self.register_buffer('laplacian', laplacian.view(1, 1, 3, 3))
+        pde_filters = torch.stack([sobel_x, sobel_y, laplacian]).unsqueeze(1)
+        self.register_buffer('pde_filters', pde_filters)
 
         # Learnable PDE coefficients (raw logits, clamped via sigmoid * MAX)
         self._dt_logit = nn.Parameter(torch.tensor(0.0))
@@ -249,9 +248,11 @@ class PhysicsPDECell(nn.Module):
             rain_mask:  (B, 1, H, W)  binary rain indicator
             emissions:  (B, 1, H, W)  total emission proxy (sum of 7 emission channels)
         """
-        dc_dx = F.conv2d(c, self.sobel_x, padding=1)
-        dc_dy = F.conv2d(c, self.sobel_y, padding=1)
-        lapl_c = F.conv2d(c, self.laplacian, padding=1)
+        # Single fused conv2d → 3 output channels: [dC/dx, dC/dy, ∇²C]
+        spatial_derivs = F.conv2d(c, self.pde_filters, padding=1)
+        dc_dx = spatial_derivs[:, 0:1, :, :]
+        dc_dy = spatial_derivs[:, 1:2, :, :]
+        lapl_c = spatial_derivs[:, 2:3, :, :]
 
         # 1. Advection: -(u·∂C/∂x + v·∂C/∂y)
         advection = -(u * dc_dx + v * dc_dy)
@@ -414,7 +415,8 @@ class FNO2D(nn.Module):
         # ========================================
         # AUTOREGRESSIVE PDE-RNN LOOP
         # ========================================
-        outputs = []
+        # Pre-allocate output tensor (avoids dynamic list append + torch.cat)
+        out_tensor = torch.empty((b, self.time_out, nx, ny), device=x.device, dtype=x.dtype)
 
         for h in range(self.time_out):
             # --- Extract weather at future hour h ---
@@ -433,7 +435,6 @@ class FNO2D(nn.Module):
             )
 
             # ---- 2. NEURAL CORRECTION ----
-            # Input: [current_pm25, all_weather, static, grid]
             step_input = torch.cat([c, weather_h, static_feats, grid], dim=1)
             feat = self.step_encoder(step_input)
             feat = self.block0(feat)
@@ -450,11 +451,10 @@ class FNO2D(nn.Module):
 
             # ---- 4. BLEND & ADVANCE ----
             c_next = alpha * physics_c + (1.0 - alpha) * neural_c
-            outputs.append(c_next)
-            c = c_next  # Feed into next step
+            out_tensor[:, h:h+1, :, :] = c_next                # direct insert
+            c = c_next
 
-        # Stack outputs → (B, 16, H, W) → (B, H, W, 16)
-        return torch.cat(outputs, dim=1).permute(0, 2, 3, 1)
+        return out_tensor.permute(0, 2, 3, 1)
 
 ================================================================================
 FILE: scripts/train.py
@@ -589,6 +589,14 @@ model = FNO2D(
     modes=cfg.model.modes,
     time_input=cfg.data.time_input
 ).to(device)
+
+# Enable cuDNN autotuner for fixed grid sizes (140x124)
+torch.backends.cudnn.benchmark = True
+
+# torch.compile fuses the 16-step RNN loop into optimized C++ kernels
+if int(torch.__version__.split('.')[0]) >= 2:
+    print("PyTorch 2.x detected! Compiling model (epoch 0 will be slow)...")
+    model = torch.compile(model, mode="reduce-overhead")
 
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
