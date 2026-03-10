@@ -93,7 +93,7 @@ model:
   width: 128
 
 training:
-  batch_size: 16
+  batch_size: 2
   epochs: 120
   lr: 5e-4
   weight_decay: 1e-4
@@ -604,6 +604,9 @@ swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
 best_val_rmse = float('inf')
 log = []
 
+# AMP: Mixed Precision for memory-efficient PDE-RNN training
+scaler = torch.cuda.amp.GradScaler()
+
 for ep in range(cfg.training.epochs):
     model.train()
     t_start = time.time()
@@ -622,30 +625,27 @@ for ep in range(cfg.training.epochs):
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Single Forward Pass (Direct Multi-Step)
-        out = model(x)
-        
-        pred_phys = to_physical(out)
-        targ_phys = to_physical(y)
-        
-        # --- NEW LOSS FORMULATION ---
-        # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
-        
-        # 2. Spatial Gradient Loss (Keeps plume edges sharp)
-        loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-        
-        # 3. Blended Total Loss
-        total_loss = huber_loss + 0.05 * loss_grad
+        # AMP: autocast runs WNO convolutions in float16, keeps physics in float32
+        with torch.cuda.amp.autocast():
+            out = model(x)
+            
+            pred_phys = to_physical(out)
+            targ_phys = to_physical(y)
+            
+            huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+            loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+            total_loss = huber_loss + 0.05 * loss_grad
 
-        
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
-        total_loss.backward()
         
+        # AMP: scaled backward + unscale before grad clipping
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
     # --- NEW: SWA SCHEDULER STEP ---
     if ep >= swa_start:
