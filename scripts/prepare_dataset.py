@@ -31,7 +31,7 @@ def load_raw_or_derived(feat, month):
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         
         # --- THE FIX: pblh added to log transform to compress diurnal variance ---
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh', 'PM25', 'NH3', 'SO2', 'NOx', 'NMVOC_e']
+        skewed_features = ['cpm25', 'rain', 'bio', 'NMVOC_finn', 'pblh', 'PM25', 'NH3', 'SO2', 'NOx', 'NMVOC_e']
         if feat in skewed_features:
             arr = np.log1p(arr)
             

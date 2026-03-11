@@ -32,7 +32,9 @@ pm_median_tensor = torch.tensor(stats['cpm25']['median'], dtype=torch.float32).t
 pm_iqr_tensor = torch.tensor(stats['cpm25']['iqr'], dtype=torch.float32).to(device).view(1, S1, S2, 1)
 
 def to_physical(x_norm):
-    return (x_norm * pm_iqr_tensor) + pm_median_tensor
+    # Un-normalize from IQR space, then un-log (expm1 reverses log1p)
+    log_val = (x_norm * pm_iqr_tensor) + pm_median_tensor
+    return torch.expm1(log_val)
 
 def spatial_gradient_loss(pred_phys, target_phys):
     dx_p = pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]
@@ -169,25 +171,12 @@ for ep in range(cfg.training.epochs):
         with torch.amp.autocast('cuda'):
             out = model(x)
             
+            # Train in smooth log-space (incredibly stable, no weighting needed)
+            total_loss = F.mse_loss(out, y)
+            
+            # Calculate physical RMSE for monitoring only
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
-            
-            # MSE loss directly optimizes RMSE (Kaggle metric)
-            # but weighted to fix the long-tail imbalance + temporal decay
-            
-            # 1. VALUE-WEIGHTED MSE: penalize spike errors 5x more
-            raw_mse = (pred_phys - targ_phys) ** 2
-            spatial_weights = torch.where(targ_phys > 80.0, 5.0, 1.0)
-            
-            # 2. TEMPORAL WEIGHTING: H1=1.0x → H16=2.5x (fight blurring)
-            # pred_phys is (B, H, W, 16) — time at dim=3
-            temp_weights = torch.linspace(1.0, 2.5, steps=16, device=x.device).view(1, 1, 1, 16)
-            
-            # 3. COMBINED WEIGHTED LOSS
-            weighted_mse = (raw_mse * spatial_weights * temp_weights).mean()
-            
-            loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-            total_loss = weighted_mse + 0.05 * loss_grad
 
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())

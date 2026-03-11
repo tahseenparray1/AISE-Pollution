@@ -133,11 +133,11 @@ class ConvBlock(nn.Module):
 
 
 # ============================================================
-# STREAM A COMPONENTS: TRANSPORT U-NET
+# PHYSICS: TOPO-AWARE WIND ADVECTION
 # ============================================================
 
 class WindAdvectionBlock(nn.Module):
-    """Topo-aware deformable conv: wind + topo → offsets."""
+    """Deformable conv: wind(32ch) + topo(1ch) → offsets."""
     def __init__(self, channels, wind_channels=33):
         super().__init__()
         mid = max(channels // 4, 32)
@@ -161,8 +161,11 @@ class WindAdvectionBlock(nn.Module):
         return features + F.gelu(self.norm(x))
 
 
+# ============================================================
+# PHYSICS: EMISSION SOURCE INJECTION
+# ============================================================
+
 class EmissionSourceLayer(nn.Module):
-    """Additive emission source bias at bottleneck."""
     def __init__(self, channels):
         super().__init__()
         self.source_bias = nn.Sequential(
@@ -173,8 +176,11 @@ class EmissionSourceLayer(nn.Module):
         return features + F.relu(self.source_bias(emissions))
 
 
+# ============================================================
+# PHYSICS: PER-HOUR PBLH/RAIN GATE
+# ============================================================
+
 class HourlyPhysicsGate(nn.Module):
-    """Per-hour dilution/washout: vectorized over all 16 hours."""
     def __init__(self):
         super().__init__()
         self.gate = nn.Sequential(
@@ -190,8 +196,11 @@ class HourlyPhysicsGate(nn.Module):
         return self.gate(gate_in).reshape(b, t, h, w)
 
 
+# ============================================================
+# PHYSICS: RESIDUAL ADVECTION
+# ============================================================
+
 class ResidualAdvection(nn.Module):
-    """Topo-aware shift of last_pm25 for moving baseline."""
     def __init__(self):
         super().__init__()
         self.offset_conv = nn.Sequential(
@@ -207,91 +216,20 @@ class ResidualAdvection(nn.Module):
 
 
 # ============================================================
-# STREAM B: SPIKE INJECTION NETWORK (Pointwise 1x1 MLP)
-#
-# Uses ONLY 1x1 convolutions — physically CANNOT see neighbors.
-# This makes it mathematically impossible to blur spike predictions.
-# Processes all 16 hours in parallel via batch reshaping.
-# ============================================================
-
-class SpikeInjectionStream(nn.Module):
-    """
-    Per-pixel emission spike predictor using strictly 1x1 convolutions.
-
-    Inputs per hour:
-        - 7 static emissions (NH3, SO2, NOx, etc.)
-        - 1 topography
-        - 1 PBLH (hour-specific: drives nighttime trapping)
-        - 1 rain_mask (hour-specific: washout)
-        - 1 t2 (hour-specific: temperature drives emission rates)
-        - 1 swdown (hour-specific: solar radiation drives photochemistry)
-        Total: 12 channels per hour
-
-    Output: (B, 16, H, W) spike injection field
-    """
-    def __init__(self, hidden=64):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Conv2d(12, hidden, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(hidden, hidden, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(hidden, hidden // 2, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(hidden // 2, 1, kernel_size=1)
-        )
-
-    def forward(self, emissions, topo, pblh_all, rain_all, t2_all, swdown_all):
-        """
-        emissions: (B, 7, H, W) — static
-        topo:      (B, 1, H, W) — static
-        Others:    (B, 16, H, W) — per-hour
-        Returns:   (B, 16, H, W)
-        """
-        b, _, h, w = emissions.shape
-        t = pblh_all.shape[1]
-
-        # Expand static features across all 16 hours → (B*16, ch, H, W)
-        emi_exp = emissions.unsqueeze(2).expand(-1, -1, t, -1, -1).reshape(b * t, 7, h, w)
-        topo_exp = topo.unsqueeze(2).expand(-1, -1, t, -1, -1).reshape(b * t, 1, h, w)
-
-        # Reshape per-hour features → (B*16, 1, H, W)
-        pblh_flat = pblh_all.reshape(b * t, 1, h, w)
-        rain_flat = rain_all.reshape(b * t, 1, h, w)
-        t2_flat = t2_all.reshape(b * t, 1, h, w)
-        swdown_flat = swdown_all.reshape(b * t, 1, h, w)
-
-        x = torch.cat([emi_exp, topo_exp, pblh_flat, rain_flat, t2_flat, swdown_flat], dim=1)
-        out = self.mlp(x)  # (B*16, 1, H, W)
-        return out.reshape(b, t, h, w)
-
-
-# ============================================================
-# DUAL-STREAM PM2.5 NETWORK
-# Class name kept as FNO2D for backward-compatible imports.
-#
-# Stream A (Transport U-Net):
-#   Encoder → Topo-aware wind advection → Emissions → Decoder
-#   Handles smooth background pollution transport (92% of map)
-#
-# Stream B (Spike Injection 1x1 MLP):
-#   Per-pixel pointwise prediction from emissions + weather
-#   Handles extreme hotspots without spatial blurring (8% of map)
-#
-# Output = Transport + Spikes
+# WIND-DEFORMABLE U-NET (Clean WD-UNet v2)
+# Class name: FNO2D for backward-compatible imports.
 # ============================================================
 
 class FNO2D(nn.Module):
     """
-    Dual-Stream Architecture for PM2.5 Forecasting.
+    Clean WD-UNet v2 with Output Physics.
+    Log-transformed target makes the network predict in smooth log-space.
 
     Input: (B, H, W, 278), Output: (B, H, W, 16)
     """
 
-    _F_T2 = 1
     _F_U10 = 2
     _F_V10 = 3
-    _F_SWDOWN = 4
     _F_PBLH = 5
     _F_RAIN_MASK = 9
 
@@ -301,33 +239,33 @@ class FNO2D(nn.Module):
         self.time_input = time_input
         self.num_temporal_feats = (in_channels - time_input - 7 - 1) // 26
 
-        c0 = width // 2     # 64
-        c1 = width           # 128
-        c2 = width * 2       # 256
+        c0 = width // 2
+        c1 = width
+        c2 = width * 2
 
-        # ---- Stream A: Transport U-Net ----
+        # Encoder
         self.enc0 = nn.Sequential(ConvBlock(in_channels + 2, c0), ConvBlock(c0, c0))
         self.enc1 = nn.Sequential(ConvBlock(c0, c1, stride=2), ConvBlock(c1, c1))
         self.enc2 = nn.Sequential(ConvBlock(c1, c2, stride=2), ConvBlock(c2, c2))
 
+        # Bottleneck
         self.wind_advection = WindAdvectionBlock(c2, wind_channels=33)
         self.emission_source = EmissionSourceLayer(c2)
         self.bottleneck = nn.Sequential(ConvBlock(c2, c2), nn.Dropout(p=0.1))
 
+        # Decoder
         self.up1 = nn.ConvTranspose2d(c2, c1, kernel_size=2, stride=2)
         self.dec1 = nn.Sequential(ConvBlock(c1 + c1, c1), ConvBlock(c1, c1))
         self.up0 = nn.ConvTranspose2d(c1, c0, kernel_size=2, stride=2)
         self.dec0 = nn.Sequential(ConvBlock(c0 + c0, c0), ConvBlock(c0, c0))
 
-        self.transport_head = nn.Sequential(
+        # Output
+        self.output_head = nn.Sequential(
             nn.Conv2d(c0, c0, 1), nn.GELU(), nn.Conv2d(c0, time_out, 1)
         )
 
         self.hourly_gate = HourlyPhysicsGate()
         self.residual_advection = ResidualAdvection()
-
-        # ---- Stream B: Spike Injection ----
-        self.spike_stream = SpikeInjectionStream(hidden=64)
 
     def get_grid(self, b, nx, ny, device):
         gridx = torch.linspace(0, 1, nx, device=device).view(1, 1, nx, 1).expand(b, 1, nx, ny)
@@ -338,16 +276,13 @@ class FNO2D(nn.Module):
         b, nx, ny, _ = x.shape
         nf = self.num_temporal_feats
 
-        # ========================================
-        # EXTRACT ALL FEATURES
-        # ========================================
+        # Extract features
         last_pm25 = x[..., self.time_input - 1:self.time_input].permute(0, 3, 1, 2)
 
         temporal = x[..., self.time_input:self.time_input + nf * 26]
         temporal = temporal.reshape(b, nx, ny, 26, nf)
-        future = temporal[:, :, :, self.time_input:, :]  # (B, H, W, 16, nf)
+        future = temporal[:, :, :, self.time_input:, :]
 
-        # Wind for advection (stacked 32ch + topo)
         future_u = future[..., self._F_U10].permute(0, 3, 1, 2)
         future_v = future[..., self._F_V10].permute(0, 3, 1, 2)
         stacked_wind = torch.cat([future_u, future_v], dim=1)
@@ -357,25 +292,20 @@ class FNO2D(nn.Module):
             future_v.mean(dim=1, keepdim=True)
         ], dim=1)
 
-        # Per-hour weather for physics gate + spike stream
         future_pblh = future[..., self._F_PBLH].permute(0, 3, 1, 2)
         future_rain = future[..., self._F_RAIN_MASK].permute(0, 3, 1, 2)
-        future_t2 = future[..., self._F_T2].permute(0, 3, 1, 2)
-        future_swdown = future[..., self._F_SWDOWN].permute(0, 3, 1, 2)
 
         emissions = x[..., -8:-1].permute(0, 3, 1, 2)
         topo = x[..., -1:].permute(0, 3, 1, 2)
 
-        # ========================================
-        # STREAM A: TRANSPORT U-NET
-        # ========================================
+        # Encoder
         x_in = torch.cat([x.permute(0, 3, 1, 2),
                           self.get_grid(b, nx, ny, x.device)], dim=1)
-
         e0 = self.enc0(x_in)
         e1 = self.enc1(e0)
         e2 = self.enc2(e1)
 
+        # Bottleneck
         bn_size = e2.shape[2:]
         wind_bn = F.interpolate(stacked_wind, size=bn_size, mode='bilinear', align_corners=False)
         topo_bn = F.interpolate(topo, size=bn_size, mode='bilinear', align_corners=False)
@@ -385,6 +315,7 @@ class FNO2D(nn.Module):
         feat = self.emission_source(feat, emi_bn)
         feat = self.bottleneck(feat)
 
+        # Decoder
         d1 = self.up1(feat)
         d1 = F.interpolate(d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
@@ -393,26 +324,14 @@ class FNO2D(nn.Module):
         d0 = F.interpolate(d0, size=e0.shape[2:], mode='bilinear', align_corners=False)
         d0 = self.dec0(torch.cat([d0, e0], dim=1))
 
-        transport = self.transport_head(d0)                            # (B, 16, H, W)
+        # Output + physics
+        base = self.output_head(d0)
         shifted_pm25 = self.residual_advection(last_pm25, avg_wind, topo)
-        transport = transport + shifted_pm25
+        base = base + shifted_pm25
         modifier = self.hourly_gate(future_pblh, future_rain)
-        transport = transport * modifier
+        out = base * modifier
 
-        # ========================================
-        # STREAM B: SPIKE INJECTION (1x1 only)
-        # ========================================
-        spikes = self.spike_stream(
-            emissions, topo,
-            future_pblh, future_rain, future_t2, future_swdown
-        )
-
-        # ========================================
-        # FUSION: Transport + Spikes
-        # ========================================
-        out = transport + spikes
-
-        return out.permute(0, 2, 3, 1)                                 # (B, H, W, 16)
+        return out.permute(0, 2, 3, 1)
 
 ================================================================================
 FILE: scripts/train.py
@@ -452,7 +371,9 @@ pm_median_tensor = torch.tensor(stats['cpm25']['median'], dtype=torch.float32).t
 pm_iqr_tensor = torch.tensor(stats['cpm25']['iqr'], dtype=torch.float32).to(device).view(1, S1, S2, 1)
 
 def to_physical(x_norm):
-    return (x_norm * pm_iqr_tensor) + pm_median_tensor
+    # Un-normalize from IQR space, then un-log (expm1 reverses log1p)
+    log_val = (x_norm * pm_iqr_tensor) + pm_median_tensor
+    return torch.expm1(log_val)
 
 def spatial_gradient_loss(pred_phys, target_phys):
     dx_p = pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]
@@ -589,25 +510,12 @@ for ep in range(cfg.training.epochs):
         with torch.amp.autocast('cuda'):
             out = model(x)
             
+            # Train in smooth log-space (incredibly stable, no weighting needed)
+            total_loss = F.mse_loss(out, y)
+            
+            # Calculate physical RMSE for monitoring only
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
-            
-            # MSE loss directly optimizes RMSE (Kaggle metric)
-            # but weighted to fix the long-tail imbalance + temporal decay
-            
-            # 1. VALUE-WEIGHTED MSE: penalize spike errors 5x more
-            raw_mse = (pred_phys - targ_phys) ** 2
-            spatial_weights = torch.where(targ_phys > 80.0, 5.0, 1.0)
-            
-            # 2. TEMPORAL WEIGHTING: H1=1.0x → H16=2.5x (fight blurring)
-            # pred_phys is (B, H, W, 16) — time at dim=3
-            temp_weights = torch.linspace(1.0, 2.5, steps=16, device=x.device).view(1, 1, 1, 16)
-            
-            # 3. COMBINED WEIGHTED LOSS
-            weighted_mse = (raw_mse * spatial_weights * temp_weights).mean()
-            
-            loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-            total_loss = weighted_mse + 0.05 * loss_grad
 
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
@@ -772,7 +680,9 @@ pm_median = stats['cpm25']['median'].reshape(1, cfg_infer.data.S1, cfg_infer.dat
 pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 1)
 
 def denorm(x):
-    return (x * pm_iqr) + pm_median
+    # Un-normalize from IQR, then un-log (expm1 reverses log1p)
+    log_val = (x * pm_iqr) + pm_median
+    return np.expm1(log_val)
 
 # Compute Static Topography Proxy using training stats
 # Note: Since psfc isn't in train.yaml features anymore, we load it directly from test_in just for this map
@@ -827,7 +737,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         seq_raw['rain_mask'] = rm
         
         # 3. Apply Log Transforms
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh', 'PM25', 'NH3', 'SO2', 'NOx', 'NMVOC_e']
+        skewed_features = ['cpm25', 'rain', 'bio', 'NMVOC_finn', 'pblh', 'PM25', 'NH3', 'SO2', 'NOx', 'NMVOC_e']
         for feat in skewed_features:
             seq_raw[feat] = np.log1p(seq_raw[feat])
 
@@ -965,7 +875,7 @@ def load_raw_or_derived(feat, month):
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         
         # --- THE FIX: pblh added to log transform to compress diurnal variance ---
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh', 'PM25', 'NH3', 'SO2', 'NOx', 'NMVOC_e']
+        skewed_features = ['cpm25', 'rain', 'bio', 'NMVOC_finn', 'pblh', 'PM25', 'NH3', 'SO2', 'NOx', 'NMVOC_e']
         if feat in skewed_features:
             arr = np.log1p(arr)
             
