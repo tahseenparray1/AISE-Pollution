@@ -184,12 +184,12 @@ class FNO2D(nn.Module):
         # Average future wind → (B, 2, H, W) for deformable conv
         avg_u = future[..., self._F_U10].mean(dim=3).unsqueeze(1)    # (B,1,H,W)
         avg_v = future[..., self._F_V10].mean(dim=3).unsqueeze(1)    # (B,1,H,W)
-        avg_wind = torch.cat([avg_u, avg_v], dim=1).permute(0, 1, 2, 3)
+        avg_wind = torch.cat([avg_u, avg_v], dim=1)
 
         # Average future PBLH + Rain → (B, 2, H, W) for FiLM
         avg_pblh = future[..., self._F_PBLH].mean(dim=3).unsqueeze(1)
         avg_rain = future[..., self._F_RAIN_MASK].mean(dim=3).unsqueeze(1)
-        pblh_rain = torch.cat([avg_pblh, avg_rain], dim=1).permute(0, 1, 2, 3)
+        pblh_rain = torch.cat([avg_pblh, avg_rain], dim=1)
 
         # Static emissions → (B, 7, H, W)
         emissions = x[..., -8:-1].permute(0, 3, 1, 2)
