@@ -146,7 +146,7 @@ best_val_rmse = float('inf')
 log = []
 
 # AMP: Mixed Precision for memory-efficient PDE-RNN training
-scaler = torch.cuda.amp.GradScaler()
+scaler = torch.amp.GradScaler('cuda')
 
 for ep in range(cfg.training.epochs):
     model.train()
@@ -166,8 +166,7 @@ for ep in range(cfg.training.epochs):
         
         optimizer.zero_grad(set_to_none=True)
         
-        # AMP: autocast runs WNO convolutions in float16, keeps physics in float32
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda'):
             out = model(x)
             
             pred_phys = to_physical(out)
@@ -254,6 +253,21 @@ for ep in range(cfg.training.epochs):
                 # Early (H1-H4) vs Late (H13-H16) temporal breakdown
                 early_mse += torch.mean((pred_phys_clipped[..., :4] - targ_phys[..., :4]) ** 2).item()
                 late_mse += torch.mean((pred_phys_clipped[..., 12:] - targ_phys[..., 12:]) ** 2).item()
+                
+                # Prediction range stats
+                if 'pred_min' not in dir():
+                    pred_min, pred_max = float('inf'), float('-inf')
+                    extreme_correct, extreme_total = 0, 0
+                pred_min = min(pred_min, pred_phys_clipped.min().item())
+                pred_max = max(pred_max, pred_phys_clipped.max().item())
+                # Extreme accuracy: for pixels > 200, is prediction within 50% of truth?
+                ext_mask = targ_phys > 200.0
+                if ext_mask.any():
+                    ext_pred = pred_phys_clipped[ext_mask]
+                    ext_true = targ_phys[ext_mask]
+                    within_50pct = (ext_pred > ext_true * 0.5) & (ext_pred < ext_true * 1.5)
+                    extreme_correct += within_50pct.sum().item()
+                    extreme_total += ext_mask.sum().item()
 
     train_rmse = np.sqrt(train_mse_acc / len(train_loader))
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
@@ -275,7 +289,11 @@ for ep in range(cfg.training.epochs):
             for i, thresh in enumerate([50, 100, 200]):
                 if spike_n_list[i] > 0:
                     print(f"  Spike RMSE (>{thresh}):{'  ' if thresh < 100 else ' '}{np.sqrt(spike_se_list[i] / spike_n_list[i]):.2f} ({spike_n_list[i]:,} px)")
+            if extreme_total > 0:
+                print(f"  Extreme Accuracy (>200, within 50%): {100*extreme_correct/extreme_total:.1f}% ({extreme_correct:,}/{extreme_total:,})")
+            print(f"  Pred Range: [{pred_min:.1f}, {pred_max:.1f}] | LR: {optimizer.param_groups[0]['lr']:.2e}")
             del hour_mse_acc, spike_se_list, spike_n_list, bg_se, bg_n, early_mse, late_mse
+            del pred_min, pred_max, extreme_correct, extreme_total
         except:
             pass
 
