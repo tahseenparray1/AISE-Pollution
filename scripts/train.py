@@ -137,7 +137,7 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.trai
 
 swa_model = AveragedModel(model)
 swa_start = int(cfg.training.epochs * 0.75)
-swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
+swa_scheduler = SWALR(optimizer, swa_lr=5e-5)  # Gentle exploration, not a shock
 
 # ==========================================
 # 5. TRAINING LOOP
@@ -173,9 +173,10 @@ for ep in range(cfg.training.epochs):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+            # MSE loss = directly optimizes RMSE (the Kaggle metric)
+            mse_loss = F.mse_loss(pred_phys, targ_phys)
             loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-            total_loss = huber_loss + 0.05 * loss_grad
+            total_loss = mse_loss + 0.05 * loss_grad
 
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
@@ -212,16 +213,46 @@ for ep in range(cfg.training.epochs):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            # Apply ReLU to mimic the physical world constraint for our final score
             pred_phys_clipped = F.relu(pred_phys)
             
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
+            
+            # Accumulate per-hour and spike/bg diagnostics
+            if ep % 10 == 0 or ep == cfg.training.epochs - 1:
+                # Per-hour MSE: (B, H, W, 16) → mean over B,H,W → (16,)
+                per_hour = torch.mean((pred_phys_clipped - targ_phys) ** 2, dim=(0, 1, 2))
+                if 'hour_mse_acc' not in dir():
+                    hour_mse_acc = torch.zeros(16, device=device)
+                    spike_se, spike_n, bg_se, bg_n = 0.0, 0, 0.0, 0
+                hour_mse_acc += per_hour
+                # Spike (>100 µg/m³) vs Background
+                spike_mask = targ_phys > 100.0
+                bg_mask = ~spike_mask
+                if spike_mask.any():
+                    spike_se += torch.sum((pred_phys_clipped[spike_mask] - targ_phys[spike_mask]) ** 2).item()
+                    spike_n += spike_mask.sum().item()
+                if bg_mask.any():
+                    bg_se += torch.sum((pred_phys_clipped[bg_mask] - targ_phys[bg_mask]) ** 2).item()
+                    bg_n += bg_mask.sum().item()
 
     train_rmse = np.sqrt(train_mse_acc / len(train_loader))
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
     
     duration = time.time() - t_start
     print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
+    
+    # Diagnostic logs every 10 epochs
+    if ep % 10 == 0 or ep == cfg.training.epochs - 1:
+        try:
+            hour_rmses = torch.sqrt(hour_mse_acc / len(val_loader)).cpu().numpy()
+            print(f"  Per-Hour RMSE: " + " | ".join([f"H{h+1}:{v:.1f}" for h, v in enumerate(hour_rmses)]))
+            if spike_n > 0:
+                print(f"  Spike RMSE (>100): {np.sqrt(spike_se / spike_n):.2f} ({spike_n} px)")
+            if bg_n > 0:
+                print(f"  Background RMSE:   {np.sqrt(bg_se / bg_n):.2f} ({bg_n} px)")
+            del hour_mse_acc, spike_se, spike_n, bg_se, bg_n
+        except:
+            pass
 
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse

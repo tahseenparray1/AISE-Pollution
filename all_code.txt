@@ -133,98 +133,162 @@ class ConvBlock(nn.Module):
 
 
 # ============================================================
-# PHYSICS MODULE 1: WIND-GUIDED DEFORMABLE CONVOLUTION
-# Replaces rigid PDE advection with learned, wind-shifted receptive fields.
-# Based on "Deformable Convolutional Networks" (Zhu et al., ICCV 2017)
+# PHYSICS MODULE 1: TOPO-AWARE WIND ADVECTION
+# Deformable conv with offsets from wind + topography.
+# The topo channel teaches the network that mountains BLOCK wind.
 # ============================================================
 
 class WindAdvectionBlock(nn.Module):
     """
-    Deformable convolution whose sampling offsets are generated from wind vectors.
-    The conv kernel physically shifts UPWIND to gather incoming pollution.
-    Uses channel compression for parameter efficiency.
+    Deformable conv whose sampling offsets come from:
+      - 16h of u10 + 16h of v10 = 32 wind channels (full trajectory)
+      - 1 topography channel (orographic blocking)
+
+    Over flat terrain: offsets follow wind direction freely.
+    Near Himalayas: topo suppresses offsets → pollution pools at mountain base.
     """
-    def __init__(self, channels):
+    def __init__(self, channels, wind_channels=33):
         super().__init__()
         mid = max(channels // 4, 32)
 
         self.compress = nn.Conv2d(channels, mid, 1)
         self.offset_conv = nn.Sequential(
-            nn.Conv2d(2, 32, kernel_size=3, padding=1),
+            nn.Conv2d(wind_channels, 32, kernel_size=3, padding=1),  # 33 = 32 wind + 1 topo
             nn.GELU(),
-            nn.Conv2d(32, 2 * 3 * 3, kernel_size=3, padding=1)   # 18 offsets per pixel
+            nn.Conv2d(32, 2 * 3 * 3, kernel_size=3, padding=1)
         )
         self.deform_weight = nn.Parameter(torch.randn(mid, mid, 3, 3) * 0.02)
         self.deform_bias = nn.Parameter(torch.zeros(mid))
         self.expand = nn.Conv2d(mid, channels, 1)
         self.norm = nn.GroupNorm(4, channels)
 
-    def forward(self, features, wind_uv):
+    def forward(self, features, wind_topo):
         x = self.compress(features)
-        offsets = self.offset_conv(wind_uv)
+        offsets = self.offset_conv(wind_topo)
         x = deform_conv2d(x, offsets, self.deform_weight,
                           bias=self.deform_bias, padding=1)
         x = self.expand(x)
-        return features + F.gelu(self.norm(x))       # residual
+        return features + F.gelu(self.norm(x))
 
 
 # ============================================================
-# PHYSICS MODULE 2: FiLM CONDITIONING (Feature-wise Linear Modulation)
-# Replaces rigid PDE sinks/sources with learned multiplicative & additive gates.
-# Based on "FiLM: Visual Reasoning with a General Conditioning Layer" (Perez et al., 2018)
+# PHYSICS MODULE 2: EMISSION SOURCE INJECTION (Bottleneck)
+# Static emissions → additive source bias at the bottleneck.
 # ============================================================
 
-class PhysicsModulationLayer(nn.Module):
-    """
-    FiLM-style physics conditioning:
-        New_Features = Features * sigmoid(f(PBLH, Rain)) + ReLU(g(Emissions))
-
-    - PBLH + Rain → multiplicative gate (dilution / wet scavenging)
-    - Emissions   → additive bias (pollution sources)
-    """
+class EmissionSourceLayer(nn.Module):
+    """Injects emission sources (static, time-invariant) at the bottleneck."""
     def __init__(self, channels):
         super().__init__()
-        self.sink_gate = nn.Sequential(
-            nn.Conv2d(2, 32, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(32, channels, kernel_size=1)
-        )
         self.source_bias = nn.Sequential(
             nn.Conv2d(7, 32, kernel_size=1),
             nn.GELU(),
             nn.Conv2d(32, channels, kernel_size=1)
         )
 
-    def forward(self, features, pblh_rain, emissions):
-        dilution = torch.sigmoid(self.sink_gate(pblh_rain))
-        sources = F.relu(self.source_bias(emissions))
-        return features * dilution + sources
+    def forward(self, features, emissions):
+        return features + F.relu(self.source_bias(emissions))
 
 
 # ============================================================
-# WIND-DEFORMABLE U-NET (WD-UNet)
+# PHYSICS MODULE 3: HOURLY PHYSICS GATE (Output)
+# Per-hour FiLM: applies hour-specific PBLH/Rain to each prediction.
+# Solves the "Nighttime Trap" and "Time-Traveling Rain" edge cases.
+# ============================================================
+
+class HourlyPhysicsGate(nn.Module):
+    """
+    Applies weather-specific modulation to EACH forecast hour individually.
+    Input: PBLH_h + Rain_h → sigmoid gate that dilutes/washes out that hour.
+
+    Applied at the OUTPUT (not bottleneck) so Hour 1 rain only affects Hour 1.
+    Processes all 16 hours in parallel via batch reshaping (no Python loop).
+    """
+    def __init__(self):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Conv2d(2, 16, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(16, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, pblh_all, rain_all):
+        """
+        Args:
+            pblh_all: (B, 16, H, W) — per-hour PBLH
+            rain_all: (B, 16, H, W) — per-hour rain mask
+        Returns:
+            modifier: (B, 16, H, W) — per-hour multiplicative gate
+        """
+        b, t, h, w = pblh_all.shape
+        # Batch all 16 hours together: (B*16, 2, H, W)
+        pblh_flat = pblh_all.reshape(b * t, 1, h, w)
+        rain_flat = rain_all.reshape(b * t, 1, h, w)
+        gate_in = torch.cat([pblh_flat, rain_flat], dim=1)
+        modifier = self.gate(gate_in)                      # (B*16, 1, H, W)
+        return modifier.reshape(b, t, h, w)                # (B, 16, H, W)
+
+
+# ============================================================
+# PHYSICS MODULE 4: RESIDUAL ADVECTION
+# Physically shifts last_pm25 by wind (topo-aware) for each hour.
+# Solves the "Ghost Plume" problem — the residual baseline MOVES.
+# ============================================================
+
+class ResidualAdvection(nn.Module):
+    """
+    Creates a wind-shifted version of last_pm25 as the residual baseline.
+    The U-Net then predicts the DELTA from this moving baseline, not a static one.
+    Uses topo-aware offsets so the shifted baseline respects mountains.
+    """
+    def __init__(self):
+        super().__init__()
+        # wind(2) + topo(1) → offsets for a 3x3 deformable identity conv
+        self.offset_conv = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(16, 2 * 3 * 3, kernel_size=3, padding=1)
+        )
+        # Initialize as identity (Dirac: center pixel = 1)
+        self.weight = nn.Parameter(torch.zeros(1, 1, 3, 3))
+        nn.init.dirac_(self.weight)
+
+    def forward(self, pm25, avg_wind, topo):
+        """
+        Args:
+            pm25: (B, 1, H, W)
+            avg_wind: (B, 2, H, W)
+            topo: (B, 1, H, W)
+        Returns:
+            shifted_pm25: (B, 1, H, W)
+        """
+        offset_input = torch.cat([avg_wind, topo], dim=1)
+        offsets = self.offset_conv(offset_input)
+        return deform_conv2d(pm25, offsets, self.weight, padding=1)
+
+
+# ============================================================
+# WIND-DEFORMABLE U-NET v2 (WD-UNet v2)
 # Class name kept as FNO2D for backward-compatible imports.
 #
-# Direct multi-step (no RNN loop):
-#   Encoder → [WindAdvection + FiLM at bottleneck] → Decoder
-#   Skip connections preserve sharp PM2.5 hotspot boundaries.
-#   Single-shot 16-hour prediction.
+# Key differences from v1:
+#   1. Topo-aware wind offsets (Himalayan blocking)
+#   2. Per-hour PBLH/Rain gate at OUTPUT (not bottleneck)
+#   3. Advected residual (moving baseline, not static)
+#   4. Emissions-only source injection at bottleneck
 # ============================================================
 
 class FNO2D(nn.Module):
     """
-    Wind-Deformable U-Net for PM2.5 forecasting.
+    WD-UNet v2: Output Physics Model.
 
-    Input layout (B, H, W, 278):
-        [0:10]    PM2.5 history (10 hours)
-        [10:270]  Temporal (10 features × 26 hours), ch = 10 + t*10 + f
-        [270:277] Static emissions (7 channels)
-        [277]     Topography (1 channel)
+    The U-Net predicts a 16-hour "Base Chemical Plume."
+    Physics is applied at the OUTPUT per-hour, not at the bottleneck with averages.
 
-    Output: (B, H, W, 16) — PM2.5 predictions for 16 future hours
+    Input: (B, H, W, 278), Output: (B, H, W, 16)
     """
 
-    # Feature indices within the 10 temporal features per timestep
     _F_U10 = 2
     _F_V10 = 3
     _F_PBLH = 5
@@ -236,37 +300,35 @@ class FNO2D(nn.Module):
         self.time_input = time_input
         self.num_temporal_feats = (in_channels - time_input - 7 - 1) // 26
 
-        # U-Net channel pyramid (controlled by the width config param)
-        c0 = width // 2     # 64
-        c1 = width           # 128
-        c2 = width * 2       # 256
+        c0 = width // 2      # 64
+        c1 = width            # 128
+        c2 = width * 2        # 256
 
         # --- Encoder ---
         self.enc0 = nn.Sequential(ConvBlock(in_channels + 2, c0), ConvBlock(c0, c0))
         self.enc1 = nn.Sequential(ConvBlock(c0, c1, stride=2), ConvBlock(c1, c1))
         self.enc2 = nn.Sequential(ConvBlock(c1, c2, stride=2), ConvBlock(c2, c2))
 
-        # --- Physics at Bottleneck ---
-        self.wind_advection = WindAdvectionBlock(c2)
-        self.physics_mod = PhysicsModulationLayer(c2)
-        self.bottleneck = nn.Sequential(
-            ConvBlock(c2, c2),
-            nn.Dropout(p=0.1)
-        )
+        # --- Bottleneck Physics ---
+        self.wind_advection = WindAdvectionBlock(c2, wind_channels=33)   # 32 wind + 1 topo
+        self.emission_source = EmissionSourceLayer(c2)
+        self.bottleneck = nn.Sequential(ConvBlock(c2, c2), nn.Dropout(p=0.1))
 
         # --- Decoder ---
         self.up1 = nn.ConvTranspose2d(c2, c1, kernel_size=2, stride=2)
         self.dec1 = nn.Sequential(ConvBlock(c1 + c1, c1), ConvBlock(c1, c1))
-
         self.up0 = nn.ConvTranspose2d(c1, c0, kernel_size=2, stride=2)
         self.dec0 = nn.Sequential(ConvBlock(c0 + c0, c0), ConvBlock(c0, c0))
 
         # --- Output Head ---
         self.output_head = nn.Sequential(
-            nn.Conv2d(c0, c0, kernel_size=1),
-            nn.GELU(),
+            nn.Conv2d(c0, c0, kernel_size=1), nn.GELU(),
             nn.Conv2d(c0, time_out, kernel_size=1)
         )
+
+        # --- Output Physics (per-hour) ---
+        self.hourly_gate = HourlyPhysicsGate()
+        self.residual_advection = ResidualAdvection()
 
     def get_grid(self, b, nx, ny, device):
         gridx = torch.linspace(0, 1, nx, device=device).view(1, 1, nx, 1).expand(b, 1, nx, ny)
@@ -274,60 +336,60 @@ class FNO2D(nn.Module):
         return torch.cat((gridx, gridy), dim=1)
 
     def forward(self, x):
-        """
-        Args:
-            x: (B, H, W, 278)
-        Returns:
-            (B, H, W, 16) PM2.5 predictions
-        """
         b, nx, ny, _ = x.shape
         nf = self.num_temporal_feats
 
         # ========================================
-        # EXTRACT PHYSICS FEATURES
+        # EXTRACT ALL PHYSICS FEATURES
         # ========================================
 
-        # Last known PM2.5 (for residual connection)
         last_pm25 = x[..., self.time_input - 1:self.time_input].permute(0, 3, 1, 2)  # (B,1,H,W)
 
-        # Unflatten temporal → (B, H, W, 26, nf)
         temporal = x[..., self.time_input:self.time_input + nf * 26]
         temporal = temporal.reshape(b, nx, ny, 26, nf)
-        future = temporal[:, :, :, self.time_input:, :]   # (B, H, W, 16, nf)
+        future = temporal[:, :, :, self.time_input:, :]  # (B, H, W, 16, nf)
 
-        # Average future wind → (B, 2, H, W) for deformable conv
-        avg_u = future[..., self._F_U10].mean(dim=3).unsqueeze(1)    # (B,1,H,W)
-        avg_v = future[..., self._F_V10].mean(dim=3).unsqueeze(1)    # (B,1,H,W)
-        avg_wind = torch.cat([avg_u, avg_v], dim=1)
+        # Stacked wind: all 16 future hours of u10,v10 → (B, 32, H, W)
+        future_u = future[..., self._F_U10].permute(0, 3, 1, 2)       # (B, 16, H, W)
+        future_v = future[..., self._F_V10].permute(0, 3, 1, 2)       # (B, 16, H, W)
+        stacked_wind = torch.cat([future_u, future_v], dim=1)          # (B, 32, H, W)
 
-        # Average future PBLH + Rain → (B, 2, H, W) for FiLM
-        avg_pblh = future[..., self._F_PBLH].mean(dim=3).unsqueeze(1)
-        avg_rain = future[..., self._F_RAIN_MASK].mean(dim=3).unsqueeze(1)
-        pblh_rain = torch.cat([avg_pblh, avg_rain], dim=1)
+        # Average wind for residual advection
+        avg_wind = torch.cat([
+            future_u.mean(dim=1, keepdim=True),
+            future_v.mean(dim=1, keepdim=True)
+        ], dim=1)                                                       # (B, 2, H, W)
 
-        # Static emissions → (B, 7, H, W)
-        emissions = x[..., -8:-1].permute(0, 3, 1, 2)
+        # Per-hour PBLH and Rain → (B, 16, H, W) each
+        future_pblh = future[..., self._F_PBLH].permute(0, 3, 1, 2)   # (B, 16, H, W)
+        future_rain = future[..., self._F_RAIN_MASK].permute(0, 3, 1, 2)
+
+        # Static features
+        emissions = x[..., -8:-1].permute(0, 3, 1, 2)                 # (B, 7, H, W)
+        topo = x[..., -1:].permute(0, 3, 1, 2)                        # (B, 1, H, W)
 
         # ========================================
         # ENCODER
         # ========================================
         x_in = torch.cat([x.permute(0, 3, 1, 2),
-                          self.get_grid(b, nx, ny, x.device)], dim=1)  # (B, 280, H, W)
+                          self.get_grid(b, nx, ny, x.device)], dim=1)
 
-        e0 = self.enc0(x_in)     # (B, c0, 140, 124)
-        e1 = self.enc1(e0)       # (B, c1, 70, 62)
-        e2 = self.enc2(e1)       # (B, c2, 35, 31)
+        e0 = self.enc0(x_in)
+        e1 = self.enc1(e0)
+        e2 = self.enc2(e1)
 
         # ========================================
-        # PHYSICS AT BOTTLENECK
+        # BOTTLENECK: TOPO-AWARE ADVECTION + EMISSIONS
         # ========================================
         bn_size = e2.shape[2:]
-        wind_bn = F.interpolate(avg_wind, size=bn_size, mode='bilinear', align_corners=False)
-        pr_bn = F.interpolate(pblh_rain, size=bn_size, mode='bilinear', align_corners=False)
+        wind_bn = F.interpolate(stacked_wind, size=bn_size, mode='bilinear', align_corners=False)
+        topo_bn = F.interpolate(topo, size=bn_size, mode='bilinear', align_corners=False)
         emi_bn = F.interpolate(emissions, size=bn_size, mode='bilinear', align_corners=False)
 
-        feat = self.wind_advection(e2, wind_bn)       # advection
-        feat = self.physics_mod(feat, pr_bn, emi_bn)   # dilution + sources
+        # Wind + Topo → topo-aware offsets (Himalayan blocking)
+        wind_topo_bn = torch.cat([wind_bn, topo_bn], dim=1)           # (B, 33, bnH, bnW)
+        feat = self.wind_advection(e2, wind_topo_bn)
+        feat = self.emission_source(feat, emi_bn)
         feat = self.bottleneck(feat)
 
         # ========================================
@@ -342,12 +404,21 @@ class FNO2D(nn.Module):
         d0 = self.dec0(torch.cat([d0, e0], dim=1))
 
         # ========================================
-        # OUTPUT + RESIDUAL
+        # OUTPUT: BASE FORECAST + PHYSICS GATES
         # ========================================
-        out = self.output_head(d0)       # (B, 16, H, W)
-        out = out + last_pm25            # broadcast residual
 
-        return out.permute(0, 2, 3, 1)   # (B, H, W, 16)
+        # 1. Base 16-hour forecast from U-Net
+        base = self.output_head(d0)                                    # (B, 16, H, W)
+
+        # 2. ADVECTED RESIDUAL: shift last_pm25 by wind (not static!)
+        shifted_pm25 = self.residual_advection(last_pm25, avg_wind, topo)  # (B, 1, H, W)
+        base = base + shifted_pm25                                     # broadcast over 16 hours
+
+        # 3. PER-HOUR PHYSICS GATE: hour-specific PBLH/Rain modulation
+        modifier = self.hourly_gate(future_pblh, future_rain)          # (B, 16, H, W)
+        out = base * modifier
+
+        return out.permute(0, 2, 3, 1)                                 # (B, H, W, 16)
 
 ================================================================================
 FILE: scripts/train.py
@@ -492,7 +563,7 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.trai
 
 swa_model = AveragedModel(model)
 swa_start = int(cfg.training.epochs * 0.75)
-swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
+swa_scheduler = SWALR(optimizer, swa_lr=5e-5)  # Gentle exploration, not a shock
 
 # ==========================================
 # 5. TRAINING LOOP
@@ -528,9 +599,10 @@ for ep in range(cfg.training.epochs):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+            # MSE loss = directly optimizes RMSE (the Kaggle metric)
+            mse_loss = F.mse_loss(pred_phys, targ_phys)
             loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-            total_loss = huber_loss + 0.05 * loss_grad
+            total_loss = mse_loss + 0.05 * loss_grad
 
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
@@ -567,16 +639,46 @@ for ep in range(cfg.training.epochs):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            # Apply ReLU to mimic the physical world constraint for our final score
             pred_phys_clipped = F.relu(pred_phys)
             
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
+            
+            # Accumulate per-hour and spike/bg diagnostics
+            if ep % 10 == 0 or ep == cfg.training.epochs - 1:
+                # Per-hour MSE: (B, H, W, 16) → mean over B,H,W → (16,)
+                per_hour = torch.mean((pred_phys_clipped - targ_phys) ** 2, dim=(0, 1, 2))
+                if 'hour_mse_acc' not in dir():
+                    hour_mse_acc = torch.zeros(16, device=device)
+                    spike_se, spike_n, bg_se, bg_n = 0.0, 0, 0.0, 0
+                hour_mse_acc += per_hour
+                # Spike (>100 µg/m³) vs Background
+                spike_mask = targ_phys > 100.0
+                bg_mask = ~spike_mask
+                if spike_mask.any():
+                    spike_se += torch.sum((pred_phys_clipped[spike_mask] - targ_phys[spike_mask]) ** 2).item()
+                    spike_n += spike_mask.sum().item()
+                if bg_mask.any():
+                    bg_se += torch.sum((pred_phys_clipped[bg_mask] - targ_phys[bg_mask]) ** 2).item()
+                    bg_n += bg_mask.sum().item()
 
     train_rmse = np.sqrt(train_mse_acc / len(train_loader))
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
     
     duration = time.time() - t_start
     print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
+    
+    # Diagnostic logs every 10 epochs
+    if ep % 10 == 0 or ep == cfg.training.epochs - 1:
+        try:
+            hour_rmses = torch.sqrt(hour_mse_acc / len(val_loader)).cpu().numpy()
+            print(f"  Per-Hour RMSE: " + " | ".join([f"H{h+1}:{v:.1f}" for h, v in enumerate(hour_rmses)]))
+            if spike_n > 0:
+                print(f"  Spike RMSE (>100): {np.sqrt(spike_se / spike_n):.2f} ({spike_n} px)")
+            if bg_n > 0:
+                print(f"  Background RMSE:   {np.sqrt(bg_se / bg_n):.2f} ({bg_n} px)")
+            del hour_mse_acc, spike_se, spike_n, bg_se, bg_n
+        except:
+            pass
 
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
