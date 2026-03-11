@@ -195,15 +195,22 @@ for ep in range(cfg.training.epochs):
         
         with torch.amp.autocast('cuda'):
             out = model(x)
+            
+            # --- THE ULTIMATE LOSS FIX ---
+            # Calculate pure MSE loss strictly in the log-normalized space.
+            # The network never sees the massive physical numbers during backprop!
             total_loss = F.mse_loss(out, y)
+            
+        # Detach and convert to physical space ONLY for diagnostic printouts
+        with torch.no_grad():
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
-        
-        with torch.no_grad():
-            pred_phys_clipped = F.relu(pred_phys.detach())
+            
+            pred_phys_clipped = F.relu(pred_phys)
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             train_latent_loss_acc += total_loss.item()
 
+        # Backpropagate the highly stable latent loss
         scaler.scale(total_loss).backward()
         
         scaler.unscale_(optimizer)
