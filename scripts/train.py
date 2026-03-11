@@ -131,11 +131,6 @@ model = FNO2D(
 # Enable cuDNN autotuner for fixed grid sizes (140x124)
 torch.backends.cudnn.benchmark = True
 
-# torch.compile fuses the 16-step RNN loop into optimized C++ kernels
-if int(torch.__version__.split('.')[0]) >= 2:
-    print("PyTorch 2.x detected! Compiling model (epoch 0 will be slow)...")
-    model = torch.compile(model, mode="reduce-overhead")
-
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
 
