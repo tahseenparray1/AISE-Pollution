@@ -787,21 +787,28 @@ for ep in range(cfg.training.epochs):
         with torch.amp.autocast('cuda'):
             out = model(x)
             
-            # --- THE ULTIMATE LOSS FIX ---
-            # Calculate pure MSE loss strictly in the log-normalized space.
-            # The network never sees the massive physical numbers during backprop!
-            total_loss = F.mse_loss(out, y)
+            # --- PHYSICALLY-WEIGHTED LATENT LOSS ---
+            # 1. Get physical targets (no gradients needed — y is not model output)
+            with torch.no_grad():
+                targ_phys = to_physical(y)
             
-        # Detach and convert to physical space ONLY for diagnostic printouts
+            # 2. Physical Weight Map: spikes get proportionally more gradient.
+            #    Background (<30 µg/m³) gets weight 1.0.
+            #    A spike of 300 gets weight 10.0. A spike of 600 gets 20.0.
+            weights = torch.clamp(targ_phys / 30.0, min=1.0)
+            
+            # 3. Unreduced latent MSE, weighted by physical importance
+            raw_latent_mse = F.mse_loss(out, y, reduction='none')
+            total_loss = (raw_latent_mse * weights).mean()
+
+        # Convert to physical space ONLY for diagnostic printouts
         with torch.no_grad():
             pred_phys = to_physical(out)
-            targ_phys = to_physical(y)
-            
             pred_phys_clipped = F.relu(pred_phys)
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             train_latent_loss_acc += total_loss.item()
 
-        # Backpropagate the highly stable latent loss
+        # Backpropagate the physically-weighted latent loss
         scaler.scale(total_loss).backward()
         
         scaler.unscale_(optimizer)
@@ -861,7 +868,7 @@ for ep in range(cfg.training.epochs):
     pred_neg_pct = (pred_phys < 0).float().mean().item() * 100
     
     print(f"\nEpoch {ep} | Time: {duration:.1f}s | LR: {current_lr:.2e}")
-    print(f"  Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f} | Latent MSE: {avg_latent_loss:.6f}")
+    print(f"  Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f} | Weighted Loss: {avg_latent_loss:.6f}")
     print(f"  Grad Norm: {grad_norm:.4f} | Scaler Scale: {scaler.get_scale():.0f}")
     print(f"  Val Out (normalized): mean={out_mean:.4f} std={out_std:.4f} range=[{out_min:.4f}, {out_max:.4f}]")
     print(f"  Val Pred (physical):  mean={pred_phys.mean().item():.1f} max={pred_phys.max().item():.1f} neg%={pred_neg_pct:.1f}%")
@@ -876,7 +883,7 @@ for ep in range(cfg.training.epochs):
         "epoch": ep,
         "train_rmse": round(train_rmse, 4),
         "val_rmse": round(val_rmse, 4),
-        "latent_mse": round(avg_latent_loss, 6),
+        "weighted_loss": round(avg_latent_loss, 6),
         "grad_norm": round(grad_norm, 4),
         "lr": current_lr,
         "scaler_scale": scaler.get_scale(),
