@@ -137,7 +137,7 @@ test_dataset = TestDataLoader(cfg_infer, cfg_train, stats, topo_proxy)
 test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
 
 # ==========================================
-# 3. MODEL INITIALIZATION (Time-as-Channel 2D)
+# 3. MODEL INITIALIZATION (Time-as-Channel U-Net)
 # ==========================================
 temporal_list = [f for f in cfg_train.features.met_variables if f != 'cpm25'] + cfg_train.features.derived_variables
 in_channels = 1 + len(temporal_list) + len(cfg_train.features.emission_variables) + 1

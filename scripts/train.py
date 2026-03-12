@@ -39,29 +39,14 @@ def to_physical(x_norm):
     log_val = (x_norm * pm_iqr_tensor) + pm_median_tensor
     return torch.expm1(log_val)
 
-def sobolev_loss(pred_log, targ_log):
-    """
-    Sobolev H1 gradient loss: penalizes blurry predictions by matching spatial derivatives.
-    Assumes inputs are (B, H, W, T). H is dim 1, W is dim 2.
-    """
-    # Spatial gradients along H (dim 1)
-    dx_p = pred_log[:, 1:, :, :] - pred_log[:, :-1, :, :]
-    dx_t = targ_log[:, 1:, :, :] - targ_log[:, :-1, :, :]
-    # Spatial gradients along W (dim 2)
-    dy_p = pred_log[:, :, 1:, :] - pred_log[:, :, :-1, :]
-    dy_t = targ_log[:, :, 1:, :] - targ_log[:, :, :-1, :]
-    return F.mse_loss(dx_p, dx_t) + F.mse_loss(dy_p, dy_t)
-
 # ==========================================
 # 3. DATA LOADER (Time-as-Channel)
 # ==========================================
 class FastInMemoryDataset(torch.utils.data.Dataset):
     """
-    Outputs x as (C, T=26, H, W) with DYNAMIC emissions (no mean!).
+    Outputs x as (C, T=26, H, W) with DYNAMIC emissions.
     The model internally slices to T=10 and flattens time into channels.
-    No zero-masking of future PM2.5 — the model never sees hours 10+.
-    
-    Output y shape: (H, W, T_out=16) — unchanged.
+    No zero-masking needed — the model never sees hours 10+.
     """
     def __init__(self, split, cfg):
         base_path = getattr(cfg.paths, f"savepath_{split}")
@@ -75,7 +60,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         self.total_time = cfg.data.total_time
         self.S1, self.S2 = cfg.data.S1, cfg.data.S2
         
-        # Build index mapping dynamically from feature order
+        # Build index mapping dynamically
         all_features = (cfg.features.met_variables 
                        + cfg.features.emission_variables 
                        + cfg.features.derived_variables)
@@ -83,17 +68,11 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         assert 'cpm25' in all_features, "Target variable 'cpm25' must be in met_variables!"
         self.target_idx = all_features.index('cpm25')
         
-        # Temporal weather feature indices (met vars except cpm25, plus derived vars)
         self.temporal_idx = [i for i, f in enumerate(all_features) 
                            if f != 'cpm25' and f not in cfg.features.emission_variables]
-        # Emission feature indices (now DYNAMIC — preserves diurnal chemistry cycle)
         self.emission_idx = [i for i, f in enumerate(all_features) 
                             if f in cfg.features.emission_variables]
-        # Topography is the last channel
         self.topo_idx = len(all_features)
-
-        self.n_temporal = len(self.temporal_idx)
-        self.n_emission = len(self.emission_idx)
 
     def __len__(self): 
         return len(self.valid_starts)
@@ -101,22 +80,21 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         start = self.valid_starts[idx]
         window = self.data[start : start + self.total_time]
-        # window shape: (26, H, W, V+1)
         
-        # 1. PM2.5: all 26 hours (model slices to :10 internally, no masking needed)
+        # 1. PM2.5: all 26 hours (model slices to :10 internally)
         pm = window[:, ..., self.target_idx].unsqueeze(0)  # (1, 26, H, W)
         
         # 2. Dynamic weather: 10 features × 26 hours
         temporal = window[:, ..., self.temporal_idx].permute(3, 0, 1, 2)  # (10, 26, H, W)
         
-        # 3. DYNAMIC emissions: 7 features × 26 hours (preserves diurnal cycle!)
+        # 3. DYNAMIC emissions: 7 features × 26 hours (preserves diurnal cycle)
         emissions = window[:, ..., self.emission_idx].permute(3, 0, 1, 2)  # (7, 26, H, W)
         
         # 4. Topography: broadcast to T=26
-        topo = window[0, ..., self.topo_idx]  # (H, W)
-        topo_3d = topo.unsqueeze(0).unsqueeze(0).expand(1, self.total_time, -1, -1)  # (1, 26, H, W)
+        topo = window[0, ..., self.topo_idx]
+        topo_3d = topo.unsqueeze(0).unsqueeze(0).expand(1, self.total_time, -1, -1)
         
-        # Combine: (1 + 10 + 7 + 1 = 19, 26, H, W)
+        # Combine: (19, 26, H, W)
         x = torch.cat((pm, temporal, emissions, topo_3d), dim=0)
         
         # Target: PM2.5 for hours 10-25 → (H, W, 16)
@@ -130,11 +108,10 @@ train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.bat
 val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
 # ==========================================
-# 4. MODEL & OPTIMIZER (Time-as-Channel 2D)
+# 4. MODEL & OPTIMIZER (Time-as-Channel U-Net)
 # ==========================================
-# Channel count: 1 PM2.5 + 10 temporal + 7 emissions + 1 topo = 19
 in_channels = 1 + len(train_ds.temporal_idx) + len(train_ds.emission_idx) + 1
-print(f"Building Time-as-Channel 2D Model with {in_channels} features × {cfg.data.time_input} hours = {in_channels * cfg.data.time_input} flattened channels...")
+print(f"Building Time-as-Channel U-Net with {in_channels} features × {cfg.data.time_input} hours = {in_channels * cfg.data.time_input} flattened channels...")
 
 model = FNO2D(
     in_channels=in_channels, 
@@ -151,25 +128,33 @@ model = FNO2D(
 total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"\n{'='*60}")
-print(f"TIME-AS-CHANNEL 2D MODEL DIAGNOSTICS")
+print(f"TIME-AS-CHANNEL U-NET DIAGNOSTICS")
 print(f"{'='*60}")
 print(f"  Total Parameters:     {total_params:,}")
 print(f"  Trainable Parameters: {trainable_params:,}")
 print(f"  Device:               {device}")
 print(f"  Input Features:       {in_channels} (PM:1 + Weather:{len(train_ds.temporal_idx)} + Emissions:{len(train_ds.emission_idx)} + Topo:1)")
-print(f"  Flattened Channels:   {in_channels * cfg.data.time_input} (= {in_channels} × {cfg.data.time_input})")
-print(f"  Model Width:          {cfg.model.width}")
+print(f"  Flattened Channels:   {in_channels * cfg.data.time_input}")
+print(f"  U-Net Base Width:     {cfg.model.width}")
 print(f"  Output Steps:         {cfg.data.time_out}")
 print(f"  Grid Size:            {S1}x{S2}")
 print(f"  Batch Size:           {cfg.training.batch_size}")
 print(f"  Epochs:               {cfg.training.epochs}")
-print(f"  SWA Start Epoch:      {int(cfg.training.epochs * 0.75)}")
 print(f"  Train Samples:        {len(train_ds)}")
 print(f"  Val Samples:          {len(val_ds)}")
 print(f"{'='*60}\n")
 
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
+
+# OneCycleLR: warm up to max_lr in first 30%, then smooth decay.
+# Prevents the sharp spikes from CosineAnnealing.
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=3e-3,
+    steps_per_epoch=len(train_loader),
+    epochs=cfg.training.epochs,
+    pct_start=0.3
+)
 
 swa_model = AveragedModel(model)
 swa_start = int(cfg.training.epochs * 0.75)
@@ -182,15 +167,15 @@ scaler = torch.amp.GradScaler('cuda')
 best_val_rmse = float('inf')
 log = []
 
-accumulation_steps = 4  # 4 steps * batch_size = Effective Batch Size
+accumulation_steps = 4
 
 for ep in range(cfg.training.epochs):
     model.train()
     t_start = time.time()
     train_mse_acc = 0.0
-    train_wmse_acc = 0.0
-    train_sobolev_acc = 0.0
+    train_loss_acc = 0.0
     batch_count = 0
+    last_grad_norm = 0.0  # Store grad norm before zero_grad wipes it
 
     optimizer.zero_grad(set_to_none=True)
 
@@ -211,7 +196,7 @@ for ep in range(cfg.training.epochs):
             print(f"  y physical mean:  {y_phys_check.mean().item():.1f} µg/m³")
             print(f"{'='*60}\n")
         
-        # Apply noise (skip topo channel = last in dim 1)
+        # Apply noise (skip topo channel)
         noise = torch.randn_like(x) * 0.01
         noise[:, -1, :, :, :] = 0.0
         x = x + noise
@@ -219,27 +204,24 @@ for ep in range(cfg.training.epochs):
         with torch.amp.autocast('cuda'):
             out = model(x)  # out: (B, H, W, 16)
             
-            # --- PHYSICALLY-WEIGHTED LATENT LOSS ---
+            # --- PHYSICAL HUBER LOSS ---
+            # Smooth L1 with beta=10: linear penalty for errors >10 µg/m³
             with torch.no_grad():
                 targ_phys = to_physical(y)
+            pred_phys = to_physical(out)
+            huber_loss = F.smooth_l1_loss(pred_phys, targ_phys, beta=10.0)
             
-            weights = torch.clamp(targ_phys / 30.0, min=1.0)
-            raw_latent_mse = F.mse_loss(out, y, reduction='none')
-            weighted_mse = (raw_latent_mse * weights).mean()
-            
-            # --- SOBOLEV GRADIENT LOSS ---
+            # --- SOBOLEV GRADIENT LOSS (latent space) ---
+            # Maintains sharp plume boundaries
             sob_loss = sobolev_loss(out, y)
             
-            # Combined (divided by accumulation steps)
-            total_loss = (weighted_mse + 0.1 * sob_loss) / accumulation_steps
+            total_loss = (huber_loss + 0.1 * sob_loss) / accumulation_steps
 
         # Diagnostics (no gradients)
         with torch.no_grad():
-            pred_phys = to_physical(out)
             pred_phys_clipped = F.relu(pred_phys)
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
-            train_wmse_acc += weighted_mse.item()
-            train_sobolev_acc += sob_loss.item()
+            train_loss_acc += huber_loss.item()
 
         # Backpropagate (accumulates gradients)
         scaler.scale(total_loss).backward()
@@ -247,19 +229,29 @@ for ep in range(cfg.training.epochs):
         # Step optimizer every accumulation_steps batches
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            
+            # FIX: Capture grad norm BEFORE zero_grad wipes it
+            grad_norm = 0.0
+            for p in model.parameters():
+                if p.grad is not None:
+                    grad_norm += p.grad.data.norm(2).item() ** 2
+            last_grad_norm = grad_norm ** 0.5
+            
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
             
+        # OneCycleLR steps per batch (not per epoch)
+        if ep < swa_start:
+            scheduler.step()
+            
         batch_count += 1
 
-    # --- SWA SCHEDULER STEP ---
+    # --- SWA ---
     if ep >= swa_start:
         swa_model.update_parameters(model)
         swa_scheduler.step()
-    else:
-        scheduler.step()
 
     # ==========================================
     # VALIDATION
@@ -270,13 +262,12 @@ for ep in range(cfg.training.epochs):
     val_mse_acc = 0.0
     val_sharpness_pred = 0.0
     val_sharpness_targ = 0.0
-    val_temporal_shift = 0.0
     val_batches = 0
 
     with torch.no_grad():
         for x, y in val_loader:
             x, y = x.to(device), y.to(device)
-            out = eval_model(x)  # (B, H, W, 16)
+            out = eval_model(x)
             
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
@@ -284,48 +275,31 @@ for ep in range(cfg.training.epochs):
             
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             
-            # --- TELEMETRY ---
-            # 1. Plume Sharpness Ratio
+            # Sharpness Ratio
             pred_sharp = torch.abs(pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]).mean()
             targ_sharp = torch.abs(targ_phys[:, 1:, :, :] - targ_phys[:, :-1, :, :]).mean()
             val_sharpness_pred += pred_sharp.item()
             val_sharpness_targ += targ_sharp.item()
-            
-            # 2. Temporal Shift (H1 vs H16)
-            temporal_shift = F.mse_loss(out[..., 0], out[..., 15]).item()
-            val_temporal_shift += temporal_shift
             val_batches += 1
 
     train_rmse = np.sqrt(train_mse_acc / len(train_loader))
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
-    avg_wmse = train_wmse_acc / len(train_loader)
-    avg_sobolev = train_sobolev_acc / len(train_loader)
+    avg_loss = train_loss_acc / len(train_loader)
     
     sharpness_ratio = val_sharpness_pred / (val_sharpness_targ + 1e-5) if val_batches > 0 else 0.0
-    avg_temporal_shift = val_temporal_shift / val_batches if val_batches > 0 else 0.0
-    
-    # Gradient norm
-    grad_norm = 0.0
-    for p in model.parameters():
-        if p.grad is not None:
-            grad_norm += p.grad.data.norm(2).item() ** 2
-    grad_norm = grad_norm ** 0.5
     
     current_lr = optimizer.param_groups[0]['lr']
     duration = time.time() - t_start
     
     # Output stats from last val batch
-    out_mean = out.mean().item()
-    out_std = out.std().item()
     pred_neg_pct = (pred_phys < 0).float().mean().item() * 100
     
     print(f"\nEpoch {ep} | Time: {duration:.1f}s | LR: {current_lr:.2e}")
     print(f"  Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
-    print(f"  Losses -> Weighted MSE: {avg_wmse:.6f} | Sobolev: {avg_sobolev:.6f}")
-    print(f"  Grad Norm: {grad_norm:.4f} | Scaler Scale: {scaler.get_scale():.0f}")
-    print(f"  Val Out (norm): mean={out_mean:.4f} std={out_std:.4f}")
+    print(f"  Huber Loss: {avg_loss:.4f}")
+    print(f"  Grad Norm: {last_grad_norm:.4f} | Scaler Scale: {scaler.get_scale():.0f}")
     print(f"  Val Pred (phys): mean={pred_phys.mean().item():.1f} max={pred_phys.max().item():.1f} neg%={pred_neg_pct:.1f}%")
-    print(f"  Sharpness Ratio: {sharpness_ratio:.4f} | Temporal Shift (H1 vs H16): {avg_temporal_shift:.4f}")
+    print(f"  Sharpness Ratio: {sharpness_ratio:.4f}")
 
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
@@ -337,13 +311,11 @@ for ep in range(cfg.training.epochs):
         "epoch": ep,
         "train_rmse": round(train_rmse, 4),
         "val_rmse": round(val_rmse, 4),
-        "weighted_mse": round(avg_wmse, 6),
-        "sobolev_loss": round(avg_sobolev, 6),
-        "grad_norm": round(grad_norm, 4),
+        "huber_loss": round(avg_loss, 4),
+        "grad_norm": round(last_grad_norm, 4),
         "lr": current_lr,
         "scaler_scale": scaler.get_scale(),
         "sharpness_ratio": round(sharpness_ratio, 4),
-        "temporal_shift": round(avg_temporal_shift, 4),
         "val_pred_neg_pct": round(pred_neg_pct, 2),
         "duration_s": round(duration, 1)
     }

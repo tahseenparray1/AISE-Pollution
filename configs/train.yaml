@@ -26,7 +26,7 @@ features:
 
 model:
   modes: 8
-  width: 128
+  width: 48
 
 training:
   batch_size: 16
