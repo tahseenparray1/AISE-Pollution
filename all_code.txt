@@ -108,10 +108,10 @@ features:
 
 model:
   modes: 8
-  width: 64
+  width: 128
 
 training:
-  batch_size: 4
+  batch_size: 16
   epochs: 150
   lr: 1e-3
   weight_decay: 1e-5
@@ -128,182 +128,119 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class HaarWavelet2D(nn.Module):
-    """ Native PyTorch 2D Haar Discrete Wavelet Transform """
-    def __init__(self, in_channels):
-        super().__init__()
-        h0 = [1/2, 1/2]
-        h1 = [-1/2, 1/2]
-        
-        ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
-        lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
-        hl = torch.tensor([[h0[0]*h1[0], h0[0]*h1[1]], [h0[1]*h1[0], h0[1]*h1[1]]])
-        hh = torch.tensor([[h1[0]*h1[0], h1[0]*h1[1]], [h1[1]*h1[0], h1[1]*h1[1]]])
-        
-        filters = torch.stack([ll, lh, hl, hh]).unsqueeze(1).repeat(in_channels, 1, 1, 1)
-        self.register_buffer('filters', filters)
-        self.in_channels = in_channels
-        
-    def forward(self, x):
-        return F.conv2d(x, self.filters, stride=2, groups=self.in_channels)
-
-class InverseHaarWavelet2D(nn.Module):
-    """ Native PyTorch 2D Inverse Haar Wavelet Transform """
-    def __init__(self, in_channels):
-        super().__init__()
-        h0 = [1.0, 1.0]
-        h1 = [-1.0, 1.0]
-        
-        ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
-        lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
-        hl = torch.tensor([[h0[0]*h1[0], h0[0]*h1[1]], [h0[1]*h1[0], h0[1]*h1[1]]])
-        hh = torch.tensor([[h1[0]*h1[0], h1[0]*h1[1]], [h1[1]*h1[0], h1[1]*h1[1]]])
-        
-        filters = torch.stack([ll, lh, hl, hh]).unsqueeze(1).repeat(in_channels, 1, 1, 1)
-        self.register_buffer('filters', filters)
-        self.in_channels = in_channels
-        
-    def forward(self, x):
-        return F.conv_transpose2d(x, self.filters, stride=2, groups=self.in_channels)
-
-class WNOBlock3D(nn.Module):
+class FastTimeChannelBlock(nn.Module):
     """
-    3D Spatiotemporal Wavelet Neural Operator Block.
+    Replaces Conv3D by treating temporal features as channels.
+    Input shape: (B, width, H, W) — purely 2D operations.
     
-    Uses 2D Haar wavelets for spatial multi-resolution (applied per-timestep),
-    then Conv3d for temporal-spatial coupling.
-    
-    Input/Output shape: (B, width, T, H, W)
+    Architecture:
+    - Conv2d k=3: local spatial mixing
+    - Depthwise Conv2d k=5: large-kernel wind advection
+    - Conv2d k=1: cross-channel (cross-time) mixing
+    - Residual connection
     """
     def __init__(self, width):
         super().__init__()
-        self.width = width
-        
-        # Spatial wavelets (applied per-timestep by folding T into batch)
-        self.dwt = HaarWavelet2D(width)
-        self.idwt = InverseHaarWavelet2D(width)
-        
-        # 3D spectral mixer: mixes wavelet sub-bands AND time simultaneously
-        self.spectral_mixer = nn.Conv3d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
-        
-        # 3D spatial-temporal mixer: decoupled for VRAM efficiency
-        # Temporal (3,1,1) learns hour-to-hour advection
-        # Spatial (1,5,5) learns large-kernel spatial mixing
-        # Same receptive field as (3,5,5) but ~60% less VRAM
         self.spatial_mixer = nn.Sequential(
-            nn.Conv3d(width, width, kernel_size=(3, 1, 1), padding=(1, 0, 0), groups=width),
-            nn.Conv3d(width, width, kernel_size=(1, 5, 5), padding=(0, 2, 2), groups=width)
+            nn.Conv2d(width, width, kernel_size=3, padding=1),
+            nn.GroupNorm(4, width),
+            nn.GELU(),
+            # Large receptive field for wind advection without 3D overhead
+            nn.Conv2d(width, width, kernel_size=5, padding=2, groups=width),
+            nn.GroupNorm(4, width)
         )
-        
-        self.pointwise = nn.Conv3d(width, width, 1)
-        self.norm = nn.GroupNorm(4, width)
+        # Cross-channel mixing acts as temporal mixer
+        self.channel_mixer = nn.Conv2d(width, width, kernel_size=1)
 
     def forward(self, x):
-        # x: (B, C, T, H, W)
-        B, C, T, H, W = x.shape
-        x_norm = self.norm(x)
-        
-        # 1. Fold T into batch for 2D Haar: (B*T, C, H, W)
-        x_flat = x_norm.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
-        
-        # 2. Spatial wavelet decomposition (per-timestep)
-        x_w = self.dwt(x_flat)  # (B*T, C*4, H/2, W/2)
-        
-        # 3. Unfold back to 3D: (B, C*4, T, H/2, W/2)
-        _, C4, Hh, Wh = x_w.shape
-        x_w = x_w.reshape(B, T, C4, Hh, Wh).permute(0, 2, 1, 3, 4)
-        
-        # 4. 3D spectral mixing (mixes sub-bands + time)
-        x_w = self.spectral_mixer(x_w)
-        
-        # 5. Fold + Inverse Haar + unfold
-        x_w = x_w.permute(0, 2, 1, 3, 4).reshape(B * T, C4, Hh, Wh)
-        out_w = self.idwt(x_w)  # (B*T, C, H, W)
-        out_w = out_w.reshape(B, T, C, H, W).permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
-        
-        # 6. 3D spatial-temporal mixing: the temporal advection kernel
-        out_w = self.spatial_mixer(out_w)
-        
-        # 7. Pointwise + residual
-        out = out_w + self.pointwise(x_norm)
+        out = self.spatial_mixer(x)
+        out = self.channel_mixer(out)
         return x + F.gelu(out)
 
 
 class FNO2D(nn.Module):
     """
-    3D Spatiotemporal Wavelet Neural Operator.
+    Time-as-Channel 2D Spatial Operator.
     
-    Name kept as FNO2D for backward-compatible imports.
+    Instead of 3D convolutions, flattens the T=10 input hours into channels:
+        (B, C, T=10, H, W) → (B, C*10, H, W)
+    Then applies fast, highly-optimized 2D convolutions.
+    
+    This avoids:
+    - The O(T*H*W*C*k_t*k_h*k_w) cost of 3D convolutions
+    - Haar wavelet checkerboarding artifacts
+    - Artificial gradient cliffs from zero-masked future hours
     
     Input:  (B, C_in, T, H, W) — 3D spatiotemporal field
     Output: (B, H, W, time_out) — predicted PM2.5 for future hours
     """
-    def __init__(self, in_channels, time_out=16, width=64, modes=None, 
+    def __init__(self, in_channels, time_out=16, width=128, modes=None,
                  time_input=10, time_steps=26):
         super().__init__()
         self.width = width
         self.time_out = time_out
         self.time_input = time_input
-        self.time_steps = time_steps
         
-        # 3D Input encoder: C_in + 3 grid coords → width
+        # Flatten time into channels: C_in * T_in + 2 grid coords
+        flat_channels = in_channels * time_input
+        
         self.input_encoder = nn.Sequential(
-            nn.Conv3d(in_channels + 3, width, kernel_size=1),
+            nn.Conv2d(flat_channels + 2, width, kernel_size=1),
             nn.GroupNorm(4, width),
             nn.GELU(),
             nn.Dropout(p=0.05)
         )
         
-        # 4 WNO3D blocks
-        self.block0 = WNOBlock3D(self.width)
-        self.block1 = WNOBlock3D(self.width)
-        self.block2 = WNOBlock3D(self.width)
-        self.block3 = WNOBlock3D(self.width)
+        # 4 spatial mixing blocks
+        self.block0 = FastTimeChannelBlock(self.width)
+        self.block1 = FastTimeChannelBlock(self.width)
+        self.block2 = FastTimeChannelBlock(self.width)
+        self.block3 = FastTimeChannelBlock(self.width)
         
-        # Output decoder: width → 1 channel (PM2.5)
-        self.fc1 = nn.Conv3d(self.width, 128, kernel_size=1)
-        self.fc2 = nn.Conv3d(128, 1, kernel_size=1)
+        # Output decoder
+        self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
+        self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1)
 
-    def get_grid(self, b, t, nx, ny, device):
-        """3D positional grid: (gridx, gridy, gridt) → (B, 3, T, H, W)"""
-        gridx = torch.linspace(0, 1, nx, device=device).view(1, 1, 1, nx, 1).expand(b, 1, t, nx, ny)
-        gridy = torch.linspace(0, 1, ny, device=device).view(1, 1, 1, 1, ny).expand(b, 1, t, nx, ny)
-        gridt = torch.linspace(0, 1, t, device=device).view(1, 1, t, 1, 1).expand(b, 1, t, nx, ny)
-        return torch.cat((gridx, gridy, gridt), dim=1)  # (B, 3, T, H, W)
+    def get_grid(self, b, nx, ny, device):
+        """2D positional grid: (gridx, gridy) → (B, 2, H, W)"""
+        gridx = torch.linspace(0, 1, nx, device=device).view(1, 1, nx, 1).expand(b, 1, nx, ny)
+        gridy = torch.linspace(0, 1, ny, device=device).view(1, 1, 1, ny).expand(b, 1, nx, ny)
+        return torch.cat((gridx, gridy), dim=1)
 
     def forward(self, x):
         # x: (B, C_in, T, H, W)
         b, c, t, nx, ny = x.shape
         
-        # Extract last known PM2.5 for residual (channel 0 = PM2.5, hour 9 = last input)
-        # PM2.5 is channel index 0 (first channel in the data loader)
-        last_pm25 = x[:, 0, self.time_input - 1, :, :]  # (B, H, W)
+        # Only use first T_in hours — avoids the artificial gradient cliff
+        x_in = x[:, :, :self.time_input, :, :]  # (B, C, 10, H, W)
         
-        # Append 3D positional grid
-        grid = self.get_grid(b, t, nx, ny, x.device)  # (B, 3, T, H, W)
-        x_in = torch.cat([x, grid], dim=1)  # (B, C_in+3, T, H, W)
+        # Extract last known PM2.5 for residual (channel 0, last input hour)
+        last_pm25 = x_in[:, 0, -1, :, :]  # (B, H, W)
+        
+        # Flatten Time into Channels: (B, C*T_in, H, W)
+        x_flat = x_in.reshape(b, c * self.time_input, nx, ny)
+        
+        # Append spatial grid
+        grid = self.get_grid(b, nx, ny, x.device)  # (B, 2, H, W)
+        x_flat = torch.cat([x_flat, grid], dim=1)
         
         # Encode
-        x_feat = self.input_encoder(x_in)  # (B, width, T, H, W)
+        x_feat = self.input_encoder(x_flat)
         
-        # --- FAST DIRECT EXECUTION (No Checkpointing) ---
-        x_wno = self.block0(x_feat)
-        x_wno = self.block1(x_wno)
-        x_wno = self.block2(x_wno)
-        x_wno = self.block3(x_wno)
+        # Spatial mixing (pure 2D — blazing fast)
+        x_feat = self.block0(x_feat)
+        x_feat = self.block1(x_feat)
+        x_feat = self.block2(x_feat)
+        x_feat = self.block3(x_feat)
         
-        # Decode to single-channel 26-hour prediction
-        x_wno = F.gelu(self.fc1(x_wno))   # (B, 128, T, H, W)
-        out = self.fc2(x_wno)              # (B, 1, T, H, W)
-        out = out.squeeze(1)               # (B, T, H, W)
+        # Decode to 16 future hours
+        x_feat = F.gelu(self.fc1(x_feat))   # (B, 128, H, W)
+        out = self.fc2(x_feat)               # (B, 16, H, W)
         
-        # Slice future hours: hours 10-25 = the 16 prediction targets
-        out = out[:, self.time_input:, :, :]  # (B, 16, H, W)
+        # Residual: anchor to last known PM2.5
+        out = out + last_pm25.unsqueeze(1)   # broadcast (B, 1, H, W)
         
-        # Residual connection: add last known PM2.5 to all future steps
-        out = out + last_pm25.unsqueeze(1)  # broadcast (B, 1, H, W) → (B, 16, H, W)
-        
-        # Return in (B, H, W, T_out) format for compatibility with loss code
+        # Return (B, H, W, 16) for loss compatibility
         return out.permute(0, 2, 3, 1)
 
 ################################################################################
@@ -352,12 +289,12 @@ psfc_median = np.median(psfc_test, axis=1)
 topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
 
 # ==========================================
-# 2. DATA LOADER (3D Spatiotemporal)
+# 2. DATA LOADER (Time-as-Channel)
 # ==========================================
 class TestDataLoader(torch.utils.data.Dataset):
     """
-    3D Spatiotemporal test data loader.
-    Output x shape: (C, T, H, W) where C=19, T=26
+    Outputs x as (C=19, T=26, H, W) with DYNAMIC emissions.
+    Model internally slices to T=10 and flattens time into channels.
     """
     def __init__(self, cfg_infer, cfg_train, stats_dict, topo_proxy):
         self.time_in = cfg_train.data.time_input    # 10
@@ -380,14 +317,13 @@ class TestDataLoader(torch.utils.data.Dataset):
 
         self.N = self.arrs['cpm25'].shape[0]
         
-        # Build temporal feature list (same as train.py)
         self.temporal_list = [f for f in self.met_variables if f != 'cpm25'] + self.derived_variables
 
     def __len__(self):
         return self.N
 
     def __getitem__(self, idx):
-        # 1. Extract raw sequences
+        # 1. Extract raw sequences (all 26 hours for everything except PM2.5)
         seq_raw = {}
         for feat in self.met_variables + self.emi_variables:
             if feat == "cpm25":
@@ -414,36 +350,34 @@ class TestDataLoader(torch.utils.data.Dataset):
             arr = seq_raw[feat]
             normalized[feat] = (arr - self.stats[feat]['median']) / self.stats[feat]['iqr']
         
-        # 5. Build 3D tensor: (C, T, H, W)
+        # 5. Build (C=19, T=26, H, W) tensor
         
-        # PM2.5: (1, 26, H, W) — fill hours 10-25 with normalized zero
-        # CRITICAL: Must use .copy() so we don't corrupt the original array
-        pm25_norm = normalized['cpm25'].copy()  # (10, H, W)
-        zero_val = (0.0 - self.stats['cpm25']['median']) / self.stats['cpm25']['iqr']  # (H, W)
+        # PM2.5: (1, 26, H, W) — only first 10 hours have real data,
+        # rest filled with normalized zero (model ignores them via :10 slice)
+        pm25_norm = normalized['cpm25']  # (10, H, W)
+        zero_val = (0.0 - self.stats['cpm25']['median']) / self.stats['cpm25']['iqr']
         pm25_full = np.broadcast_to(zero_val[np.newaxis, :, :], (self.total_time, self.S1, self.S2)).copy()
-        pm25_full[:self.time_in] = pm25_norm  # overwrite first 10 hours with real data
+        pm25_full[:self.time_in] = pm25_norm
         pm25_ch = torch.from_numpy(pm25_full).unsqueeze(0)  # (1, 26, H, W)
         
         # Temporal weather: (10, 26, H, W)
-        temporal_list = []
+        temporal_arrays = []
         for feat in self.temporal_list:
-            temporal_list.append(normalized[feat])  # each (26, H, W)
-        temporal_ch = torch.from_numpy(np.stack(temporal_list, axis=0))  # (10, 26, H, W)
+            temporal_arrays.append(normalized[feat])
+        temporal_ch = torch.from_numpy(np.stack(temporal_arrays, axis=0))  # (10, 26, H, W)
         
-        # Static emissions: (7, 26, H, W) — mean across time, broadcast
-        static_list = []
+        # DYNAMIC emissions: (7, 26, H, W) — preserves diurnal cycle
+        emission_arrays = []
         for feat in self.emi_variables:
-            arr = normalized[feat]  # (26, H, W)
-            static_list.append(arr.mean(axis=0))  # (H, W) — mean across time
-        static_mean = torch.from_numpy(np.stack(static_list, axis=0))  # (7, H, W)
-        static_ch = static_mean.unsqueeze(1).expand(-1, self.total_time, -1, -1)  # (7, 26, H, W)
+            emission_arrays.append(normalized[feat])
+        emission_ch = torch.from_numpy(np.stack(emission_arrays, axis=0))  # (7, 26, H, W)
         
         # Topography: (1, 26, H, W)
-        topo = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+        topo = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(0).unsqueeze(0)
         topo_ch = topo.expand(1, self.total_time, -1, -1)  # (1, 26, H, W)
         
         # Combine: (19, 26, H, W)
-        x = torch.cat((pm25_ch, temporal_ch, static_ch, topo_ch), dim=0)
+        x = torch.cat((pm25_ch, temporal_ch, emission_ch, topo_ch), dim=0)
         
         return x
 
@@ -452,13 +386,12 @@ test_dataset = TestDataLoader(cfg_infer, cfg_train, stats, topo_proxy)
 test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
 
 # ==========================================
-# 3. MODEL INITIALIZATION (3D Spatiotemporal WNO)
+# 3. MODEL INITIALIZATION (Time-as-Channel 2D)
 # ==========================================
-# Channel count: 1 PM2.5 + 10 temporal + 7 static + 1 topo = 19
 temporal_list = [f for f in cfg_train.features.met_variables if f != 'cpm25'] + cfg_train.features.derived_variables
 in_channels = 1 + len(temporal_list) + len(cfg_train.features.emission_variables) + 1
 
-print(f"Building 3D Spatiotemporal WNO with {in_channels} input channels...")
+print(f"Building Time-as-Channel 2D Model with {in_channels} features × {cfg_train.data.time_input} hours...")
 model = FNO2D(
     in_channels=in_channels,
     time_out=cfg_train.data.time_out,
@@ -687,13 +620,15 @@ def sobolev_loss(pred_log, targ_log):
     return F.mse_loss(dx_p, dx_t) + F.mse_loss(dy_p, dy_t)
 
 # ==========================================
-# 3. DATA LOADER (3D Spatiotemporal)
+# 3. DATA LOADER (Time-as-Channel)
 # ==========================================
 class FastInMemoryDataset(torch.utils.data.Dataset):
     """
-    3D Spatiotemporal data loader.
-    Output x shape: (C, T, H, W) where C=19, T=26
-    Output y shape: (H, W, T_out) where T_out=16
+    Outputs x as (C, T=26, H, W) with DYNAMIC emissions (no mean!).
+    The model internally slices to T=10 and flattens time into channels.
+    No zero-masking of future PM2.5 — the model never sees hours 10+.
+    
+    Output y shape: (H, W, T_out=16) — unchanged.
     """
     def __init__(self, split, cfg):
         base_path = getattr(cfg.paths, f"savepath_{split}")
@@ -718,57 +653,41 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # Temporal weather feature indices (met vars except cpm25, plus derived vars)
         self.temporal_idx = [i for i, f in enumerate(all_features) 
                            if f != 'cpm25' and f not in cfg.features.emission_variables]
-        # Static emission feature indices
-        self.static_idx = [i for i, f in enumerate(all_features) 
-                          if f in cfg.features.emission_variables]
+        # Emission feature indices (now DYNAMIC — preserves diurnal chemistry cycle)
+        self.emission_idx = [i for i, f in enumerate(all_features) 
+                            if f in cfg.features.emission_variables]
         # Topography is the last channel
         self.topo_idx = len(all_features)
 
         self.n_temporal = len(self.temporal_idx)
-        self.n_static = len(self.static_idx)
+        self.n_emission = len(self.emission_idx)
 
     def __len__(self): 
         return len(self.valid_starts)
 
     def __getitem__(self, idx):
         start = self.valid_starts[idx]
-        window = self.data[start : start + self.total_time].clone()
+        window = self.data[start : start + self.total_time]
         # window shape: (26, H, W, V+1)
         
-        # 1. PM2.5 across all 26 hours: mask hours 10-25 (future)
-        # CRITICAL: Use normalized zero, not literal 0.0!
-        # In normalized space, 0.0 physical PM2.5 = (log1p(0) - median) / iqr = -median/iqr
-        zero_val = torch.tensor(
-            (0.0 - stats['cpm25']['median']) / stats['cpm25']['iqr'],
-            dtype=torch.float32
-        )  # (H, W) grid of normalized zeros
+        # 1. PM2.5: all 26 hours (model slices to :10 internally, no masking needed)
+        pm = window[:, ..., self.target_idx].unsqueeze(0)  # (1, 26, H, W)
         
-        # CRITICAL: Must .clone() so we don't overwrite the original window (which y is extracted from)
-        pm_full = window[:, ..., self.target_idx].clone()  # (26, H, W)
-        pm_full[self.time_in:] = zero_val  # fill with true normalized zero
-        pm_full = pm_full.unsqueeze(0)  # (1, 26, H, W)
+        # 2. Dynamic weather: 10 features × 26 hours
+        temporal = window[:, ..., self.temporal_idx].permute(3, 0, 1, 2)  # (10, 26, H, W)
         
-        # 2. Dynamic temporal weather: 10 features across 26 hours
-        # Shape: (10, 26, H, W)
-        temporal = window[:, ..., self.temporal_idx]  # (26, H, W, 10)
-        temporal = temporal.permute(3, 0, 1, 2)  # (10, 26, H, W)
+        # 3. DYNAMIC emissions: 7 features × 26 hours (preserves diurnal cycle!)
+        emissions = window[:, ..., self.emission_idx].permute(3, 0, 1, 2)  # (7, 26, H, W)
         
-        # 3. Static emissions: mean across time, broadcast to T=26
-        # Shape: (7, 26, H, W)
-        static_mean = window[:, ..., self.static_idx].mean(dim=0)  # (H, W, 7)
-        static_mean = static_mean.permute(2, 0, 1)  # (7, H, W)
-        static_3d = static_mean.unsqueeze(1).expand(-1, self.total_time, -1, -1)  # (7, 26, H, W)
-        
-        # 4. Topography: constant, broadcast to T=26
-        # Shape: (1, 26, H, W)
+        # 4. Topography: broadcast to T=26
         topo = window[0, ..., self.topo_idx]  # (H, W)
         topo_3d = topo.unsqueeze(0).unsqueeze(0).expand(1, self.total_time, -1, -1)  # (1, 26, H, W)
         
         # Combine: (1 + 10 + 7 + 1 = 19, 26, H, W)
-        x = torch.cat((pm_full, temporal, static_3d, topo_3d), dim=0)
+        x = torch.cat((pm, temporal, emissions, topo_3d), dim=0)
         
-        # Target: PM2.5 for hours 10-25 → (H, W, 16) — same format as before
-        y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)  # (H, W, 16)
+        # Target: PM2.5 for hours 10-25 → (H, W, 16)
+        y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
         return x, y
 
 train_ds = FastInMemoryDataset("train", cfg)
@@ -778,11 +697,11 @@ train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.bat
 val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
 # ==========================================
-# 4. MODEL & OPTIMIZER (3D Spatiotemporal WNO)
+# 4. MODEL & OPTIMIZER (Time-as-Channel 2D)
 # ==========================================
-# Channel count: 1 PM2.5 + 10 temporal + 7 static + 1 topo = 19
-in_channels = 1 + len(train_ds.temporal_idx) + len(train_ds.static_idx) + 1
-print(f"Building 3D Spatiotemporal WNO with {in_channels} input channels...")
+# Channel count: 1 PM2.5 + 10 temporal + 7 emissions + 1 topo = 19
+in_channels = 1 + len(train_ds.temporal_idx) + len(train_ds.emission_idx) + 1
+print(f"Building Time-as-Channel 2D Model with {in_channels} features × {cfg.data.time_input} hours = {in_channels * cfg.data.time_input} flattened channels...")
 
 model = FNO2D(
     in_channels=in_channels, 
@@ -799,13 +718,14 @@ model = FNO2D(
 total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"\n{'='*60}")
-print(f"3D SPATIOTEMPORAL WNO DIAGNOSTICS")
+print(f"TIME-AS-CHANNEL 2D MODEL DIAGNOSTICS")
 print(f"{'='*60}")
 print(f"  Total Parameters:     {total_params:,}")
 print(f"  Trainable Parameters: {trainable_params:,}")
 print(f"  Device:               {device}")
-print(f"  Input Channels:       {in_channels} (PM:1 + Temporal:{len(train_ds.temporal_idx)} + Static:{len(train_ds.static_idx)} + Topo:1)")
-print(f"  Time Steps (T):       {cfg.data.total_time}")
+print(f"  Input Features:       {in_channels} (PM:1 + Weather:{len(train_ds.temporal_idx)} + Emissions:{len(train_ds.emission_idx)} + Topo:1)")
+print(f"  Flattened Channels:   {in_channels * cfg.data.time_input} (= {in_channels} × {cfg.data.time_input})")
+print(f"  Model Width:          {cfg.model.width}")
 print(f"  Output Steps:         {cfg.data.time_out}")
 print(f"  Grid Size:            {S1}x{S2}")
 print(f"  Batch Size:           {cfg.training.batch_size}")
@@ -813,8 +733,6 @@ print(f"  Epochs:               {cfg.training.epochs}")
 print(f"  SWA Start Epoch:      {int(cfg.training.epochs * 0.75)}")
 print(f"  Train Samples:        {len(train_ds)}")
 print(f"  Val Samples:          {len(val_ds)}")
-print(f"  PM25 Median Stats:    min={stats['cpm25']['median'].min():.4f}  max={stats['cpm25']['median'].max():.4f}")
-print(f"  PM25 IQR Stats:       min={stats['cpm25']['iqr'].min():.4f}  max={stats['cpm25']['iqr'].max():.4f}")
 print(f"{'='*60}\n")
 
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
@@ -831,7 +749,7 @@ scaler = torch.amp.GradScaler('cuda')
 best_val_rmse = float('inf')
 log = []
 
-accumulation_steps = 4  # 4 steps * batch_size 4 = Effective Batch Size 16
+accumulation_steps = 4  # 4 steps * batch_size = Effective Batch Size
 
 for ep in range(cfg.training.epochs):
     model.train()
@@ -841,7 +759,7 @@ for ep in range(cfg.training.epochs):
     train_sobolev_acc = 0.0
     batch_count = 0
 
-    optimizer.zero_grad(set_to_none=True)  # Zero out at start of epoch
+    optimizer.zero_grad(set_to_none=True)
 
     for i, (x, y) in enumerate(tqdm(train_loader, desc=f"Epoch {ep}")):
         x, y = x.to(device), y.to(device)
@@ -857,11 +775,12 @@ for ep in range(cfg.training.epochs):
             print(f"  x has NaN: {torch.isnan(x).any().item()}")
             y_phys_check = to_physical(y)
             print(f"  y physical range: [{y_phys_check.min().item():.1f}, {y_phys_check.max().item():.1f}] µg/m³")
+            print(f"  y physical mean:  {y_phys_check.mean().item():.1f} µg/m³")
             print(f"{'='*60}\n")
         
         # Apply noise (skip topo channel = last in dim 1)
         noise = torch.randn_like(x) * 0.01
-        noise[:, -1, :, :, :] = 0.0  # don't noise topography (last channel)
+        noise[:, -1, :, :, :] = 0.0
         x = x + noise
         
         with torch.amp.autocast('cuda'):
@@ -878,7 +797,7 @@ for ep in range(cfg.training.epochs):
             # --- SOBOLEV GRADIENT LOSS ---
             sob_loss = sobolev_loss(out, y)
             
-            # Combined: weighted MSE + Sobolev (divided by accumulation steps)
+            # Combined (divided by accumulation steps)
             total_loss = (weighted_mse + 0.1 * sob_loss) / accumulation_steps
 
         # Diagnostics (no gradients)
@@ -892,7 +811,7 @@ for ep in range(cfg.training.epochs):
         # Backpropagate (accumulates gradients)
         scaler.scale(total_loss).backward()
         
-        # Only step optimizer every accumulation_steps batches
+        # Step optimizer every accumulation_steps batches
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -932,15 +851,14 @@ for ep in range(cfg.training.epochs):
             
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             
-            # --- NEW TELEMETRY ---
-            # 1. Plume Sharpness Ratio (gradient norm)
-            pred_sharp = torch.abs(pred_phys[..., 1:] - pred_phys[..., :-1]).mean()
-            targ_sharp = torch.abs(targ_phys[..., 1:] - targ_phys[..., :-1]).mean()
+            # --- TELEMETRY ---
+            # 1. Plume Sharpness Ratio
+            pred_sharp = torch.abs(pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]).mean()
+            targ_sharp = torch.abs(targ_phys[:, 1:, :, :] - targ_phys[:, :-1, :, :]).mean()
             val_sharpness_pred += pred_sharp.item()
             val_sharpness_targ += targ_sharp.item()
             
-            # 2. Temporal Advection Shift (H1 vs H16)
-            # out: (B, H, W, 16) — compare first and last predicted hours
+            # 2. Temporal Shift (H1 vs H16)
             temporal_shift = F.mse_loss(out[..., 0], out[..., 15]).item()
             val_temporal_shift += temporal_shift
             val_batches += 1
@@ -950,11 +868,10 @@ for ep in range(cfg.training.epochs):
     avg_wmse = train_wmse_acc / len(train_loader)
     avg_sobolev = train_sobolev_acc / len(train_loader)
     
-    # Telemetry averages
     sharpness_ratio = val_sharpness_pred / (val_sharpness_targ + 1e-5) if val_batches > 0 else 0.0
     avg_temporal_shift = val_temporal_shift / val_batches if val_batches > 0 else 0.0
     
-    # --- Gradient norm ---
+    # Gradient norm
     grad_norm = 0.0
     for p in model.parameters():
         if p.grad is not None:

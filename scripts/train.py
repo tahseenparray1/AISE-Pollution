@@ -53,13 +53,15 @@ def sobolev_loss(pred_log, targ_log):
     return F.mse_loss(dx_p, dx_t) + F.mse_loss(dy_p, dy_t)
 
 # ==========================================
-# 3. DATA LOADER (3D Spatiotemporal)
+# 3. DATA LOADER (Time-as-Channel)
 # ==========================================
 class FastInMemoryDataset(torch.utils.data.Dataset):
     """
-    3D Spatiotemporal data loader.
-    Output x shape: (C, T, H, W) where C=19, T=26
-    Output y shape: (H, W, T_out) where T_out=16
+    Outputs x as (C, T=26, H, W) with DYNAMIC emissions (no mean!).
+    The model internally slices to T=10 and flattens time into channels.
+    No zero-masking of future PM2.5 — the model never sees hours 10+.
+    
+    Output y shape: (H, W, T_out=16) — unchanged.
     """
     def __init__(self, split, cfg):
         base_path = getattr(cfg.paths, f"savepath_{split}")
@@ -84,57 +86,41 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # Temporal weather feature indices (met vars except cpm25, plus derived vars)
         self.temporal_idx = [i for i, f in enumerate(all_features) 
                            if f != 'cpm25' and f not in cfg.features.emission_variables]
-        # Static emission feature indices
-        self.static_idx = [i for i, f in enumerate(all_features) 
-                          if f in cfg.features.emission_variables]
+        # Emission feature indices (now DYNAMIC — preserves diurnal chemistry cycle)
+        self.emission_idx = [i for i, f in enumerate(all_features) 
+                            if f in cfg.features.emission_variables]
         # Topography is the last channel
         self.topo_idx = len(all_features)
 
         self.n_temporal = len(self.temporal_idx)
-        self.n_static = len(self.static_idx)
+        self.n_emission = len(self.emission_idx)
 
     def __len__(self): 
         return len(self.valid_starts)
 
     def __getitem__(self, idx):
         start = self.valid_starts[idx]
-        window = self.data[start : start + self.total_time].clone()
+        window = self.data[start : start + self.total_time]
         # window shape: (26, H, W, V+1)
         
-        # 1. PM2.5 across all 26 hours: mask hours 10-25 (future)
-        # CRITICAL: Use normalized zero, not literal 0.0!
-        # In normalized space, 0.0 physical PM2.5 = (log1p(0) - median) / iqr = -median/iqr
-        zero_val = torch.tensor(
-            (0.0 - stats['cpm25']['median']) / stats['cpm25']['iqr'],
-            dtype=torch.float32
-        )  # (H, W) grid of normalized zeros
+        # 1. PM2.5: all 26 hours (model slices to :10 internally, no masking needed)
+        pm = window[:, ..., self.target_idx].unsqueeze(0)  # (1, 26, H, W)
         
-        # CRITICAL: Must .clone() so we don't overwrite the original window (which y is extracted from)
-        pm_full = window[:, ..., self.target_idx].clone()  # (26, H, W)
-        pm_full[self.time_in:] = zero_val  # fill with true normalized zero
-        pm_full = pm_full.unsqueeze(0)  # (1, 26, H, W)
+        # 2. Dynamic weather: 10 features × 26 hours
+        temporal = window[:, ..., self.temporal_idx].permute(3, 0, 1, 2)  # (10, 26, H, W)
         
-        # 2. Dynamic temporal weather: 10 features across 26 hours
-        # Shape: (10, 26, H, W)
-        temporal = window[:, ..., self.temporal_idx]  # (26, H, W, 10)
-        temporal = temporal.permute(3, 0, 1, 2)  # (10, 26, H, W)
+        # 3. DYNAMIC emissions: 7 features × 26 hours (preserves diurnal cycle!)
+        emissions = window[:, ..., self.emission_idx].permute(3, 0, 1, 2)  # (7, 26, H, W)
         
-        # 3. Static emissions: mean across time, broadcast to T=26
-        # Shape: (7, 26, H, W)
-        static_mean = window[:, ..., self.static_idx].mean(dim=0)  # (H, W, 7)
-        static_mean = static_mean.permute(2, 0, 1)  # (7, H, W)
-        static_3d = static_mean.unsqueeze(1).expand(-1, self.total_time, -1, -1)  # (7, 26, H, W)
-        
-        # 4. Topography: constant, broadcast to T=26
-        # Shape: (1, 26, H, W)
+        # 4. Topography: broadcast to T=26
         topo = window[0, ..., self.topo_idx]  # (H, W)
         topo_3d = topo.unsqueeze(0).unsqueeze(0).expand(1, self.total_time, -1, -1)  # (1, 26, H, W)
         
         # Combine: (1 + 10 + 7 + 1 = 19, 26, H, W)
-        x = torch.cat((pm_full, temporal, static_3d, topo_3d), dim=0)
+        x = torch.cat((pm, temporal, emissions, topo_3d), dim=0)
         
-        # Target: PM2.5 for hours 10-25 → (H, W, 16) — same format as before
-        y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)  # (H, W, 16)
+        # Target: PM2.5 for hours 10-25 → (H, W, 16)
+        y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
         return x, y
 
 train_ds = FastInMemoryDataset("train", cfg)
@@ -144,11 +130,11 @@ train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.bat
 val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
 # ==========================================
-# 4. MODEL & OPTIMIZER (3D Spatiotemporal WNO)
+# 4. MODEL & OPTIMIZER (Time-as-Channel 2D)
 # ==========================================
-# Channel count: 1 PM2.5 + 10 temporal + 7 static + 1 topo = 19
-in_channels = 1 + len(train_ds.temporal_idx) + len(train_ds.static_idx) + 1
-print(f"Building 3D Spatiotemporal WNO with {in_channels} input channels...")
+# Channel count: 1 PM2.5 + 10 temporal + 7 emissions + 1 topo = 19
+in_channels = 1 + len(train_ds.temporal_idx) + len(train_ds.emission_idx) + 1
+print(f"Building Time-as-Channel 2D Model with {in_channels} features × {cfg.data.time_input} hours = {in_channels * cfg.data.time_input} flattened channels...")
 
 model = FNO2D(
     in_channels=in_channels, 
@@ -165,13 +151,14 @@ model = FNO2D(
 total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"\n{'='*60}")
-print(f"3D SPATIOTEMPORAL WNO DIAGNOSTICS")
+print(f"TIME-AS-CHANNEL 2D MODEL DIAGNOSTICS")
 print(f"{'='*60}")
 print(f"  Total Parameters:     {total_params:,}")
 print(f"  Trainable Parameters: {trainable_params:,}")
 print(f"  Device:               {device}")
-print(f"  Input Channels:       {in_channels} (PM:1 + Temporal:{len(train_ds.temporal_idx)} + Static:{len(train_ds.static_idx)} + Topo:1)")
-print(f"  Time Steps (T):       {cfg.data.total_time}")
+print(f"  Input Features:       {in_channels} (PM:1 + Weather:{len(train_ds.temporal_idx)} + Emissions:{len(train_ds.emission_idx)} + Topo:1)")
+print(f"  Flattened Channels:   {in_channels * cfg.data.time_input} (= {in_channels} × {cfg.data.time_input})")
+print(f"  Model Width:          {cfg.model.width}")
 print(f"  Output Steps:         {cfg.data.time_out}")
 print(f"  Grid Size:            {S1}x{S2}")
 print(f"  Batch Size:           {cfg.training.batch_size}")
@@ -179,8 +166,6 @@ print(f"  Epochs:               {cfg.training.epochs}")
 print(f"  SWA Start Epoch:      {int(cfg.training.epochs * 0.75)}")
 print(f"  Train Samples:        {len(train_ds)}")
 print(f"  Val Samples:          {len(val_ds)}")
-print(f"  PM25 Median Stats:    min={stats['cpm25']['median'].min():.4f}  max={stats['cpm25']['median'].max():.4f}")
-print(f"  PM25 IQR Stats:       min={stats['cpm25']['iqr'].min():.4f}  max={stats['cpm25']['iqr'].max():.4f}")
 print(f"{'='*60}\n")
 
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
@@ -197,7 +182,7 @@ scaler = torch.amp.GradScaler('cuda')
 best_val_rmse = float('inf')
 log = []
 
-accumulation_steps = 4  # 4 steps * batch_size 4 = Effective Batch Size 16
+accumulation_steps = 4  # 4 steps * batch_size = Effective Batch Size
 
 for ep in range(cfg.training.epochs):
     model.train()
@@ -207,7 +192,7 @@ for ep in range(cfg.training.epochs):
     train_sobolev_acc = 0.0
     batch_count = 0
 
-    optimizer.zero_grad(set_to_none=True)  # Zero out at start of epoch
+    optimizer.zero_grad(set_to_none=True)
 
     for i, (x, y) in enumerate(tqdm(train_loader, desc=f"Epoch {ep}")):
         x, y = x.to(device), y.to(device)
@@ -223,11 +208,12 @@ for ep in range(cfg.training.epochs):
             print(f"  x has NaN: {torch.isnan(x).any().item()}")
             y_phys_check = to_physical(y)
             print(f"  y physical range: [{y_phys_check.min().item():.1f}, {y_phys_check.max().item():.1f}] µg/m³")
+            print(f"  y physical mean:  {y_phys_check.mean().item():.1f} µg/m³")
             print(f"{'='*60}\n")
         
         # Apply noise (skip topo channel = last in dim 1)
         noise = torch.randn_like(x) * 0.01
-        noise[:, -1, :, :, :] = 0.0  # don't noise topography (last channel)
+        noise[:, -1, :, :, :] = 0.0
         x = x + noise
         
         with torch.amp.autocast('cuda'):
@@ -244,7 +230,7 @@ for ep in range(cfg.training.epochs):
             # --- SOBOLEV GRADIENT LOSS ---
             sob_loss = sobolev_loss(out, y)
             
-            # Combined: weighted MSE + Sobolev (divided by accumulation steps)
+            # Combined (divided by accumulation steps)
             total_loss = (weighted_mse + 0.1 * sob_loss) / accumulation_steps
 
         # Diagnostics (no gradients)
@@ -258,7 +244,7 @@ for ep in range(cfg.training.epochs):
         # Backpropagate (accumulates gradients)
         scaler.scale(total_loss).backward()
         
-        # Only step optimizer every accumulation_steps batches
+        # Step optimizer every accumulation_steps batches
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -298,15 +284,14 @@ for ep in range(cfg.training.epochs):
             
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             
-            # --- NEW TELEMETRY ---
-            # 1. Plume Sharpness Ratio (gradient norm)
-            pred_sharp = torch.abs(pred_phys[..., 1:] - pred_phys[..., :-1]).mean()
-            targ_sharp = torch.abs(targ_phys[..., 1:] - targ_phys[..., :-1]).mean()
+            # --- TELEMETRY ---
+            # 1. Plume Sharpness Ratio
+            pred_sharp = torch.abs(pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]).mean()
+            targ_sharp = torch.abs(targ_phys[:, 1:, :, :] - targ_phys[:, :-1, :, :]).mean()
             val_sharpness_pred += pred_sharp.item()
             val_sharpness_targ += targ_sharp.item()
             
-            # 2. Temporal Advection Shift (H1 vs H16)
-            # out: (B, H, W, 16) — compare first and last predicted hours
+            # 2. Temporal Shift (H1 vs H16)
             temporal_shift = F.mse_loss(out[..., 0], out[..., 15]).item()
             val_temporal_shift += temporal_shift
             val_batches += 1
@@ -316,11 +301,10 @@ for ep in range(cfg.training.epochs):
     avg_wmse = train_wmse_acc / len(train_loader)
     avg_sobolev = train_sobolev_acc / len(train_loader)
     
-    # Telemetry averages
     sharpness_ratio = val_sharpness_pred / (val_sharpness_targ + 1e-5) if val_batches > 0 else 0.0
     avg_temporal_shift = val_temporal_shift / val_batches if val_batches > 0 else 0.0
     
-    # --- Gradient norm ---
+    # Gradient norm
     grad_norm = 0.0
     for p in model.parameters():
         if p.grad is not None:
