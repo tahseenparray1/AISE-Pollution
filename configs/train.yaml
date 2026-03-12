@@ -26,10 +26,10 @@ features:
 
 model:
   modes: 8
-  width: 256
+  width: 128
 
 training:
-  batch_size: 4
+  batch_size: 16
   epochs: 150
   lr: 1e-3
   weight_decay: 1e-5
