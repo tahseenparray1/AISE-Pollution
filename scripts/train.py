@@ -157,7 +157,7 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.trai
 
 swa_model = AveragedModel(model)
 swa_start = int(cfg.training.epochs * 0.75)
-swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
+swa_scheduler = SWALR(optimizer, swa_lr=5e-5)
 
 # ==========================================
 # 5. TRAINING LOOP
