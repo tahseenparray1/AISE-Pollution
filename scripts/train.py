@@ -215,24 +215,33 @@ for ep in range(cfg.training.epochs):
         with torch.amp.autocast('cuda'):
             out = model(x)  # out: (B, H, W, 16)
             
-            # --- PHYSICAL HUBER LOSS ---
-            # Smooth L1 with beta=10: linear penalty for errors >10 µg/m³
+            # 1. Convert to physical space
             with torch.no_grad():
                 targ_phys = to_physical(y)
             pred_phys = to_physical(out)
-            huber_loss = F.smooth_l1_loss(pred_phys, targ_phys, beta=10.0)
             
-            # --- SOBOLEV GRADIENT LOSS (latent space) ---
-            # Maintains sharp plume boundaries
+            # 2. Primary Loss: Physical MAE (L1)
+            # Linear penalty prevents background drift from outlier hedging
+            l1_loss = F.l1_loss(pred_phys, targ_phys)
+            
+            # 3. Temporal Consistency Loss (derivative in time)
+            # Penalizes unphysical hour-to-hour jumps
+            # out/y shape: (B, H, W, 16) — time is dim 3
+            temp_pred = out[:, :, :, 1:] - out[:, :, :, :-1]
+            temp_targ = y[:, :, :, 1:] - y[:, :, :, :-1]
+            temporal_loss = F.mse_loss(temp_pred, temp_targ)
+            
+            # 4. Sobolev Loss (spatial gradient matching)
             sob_loss = sobolev_loss(out, y)
             
-            total_loss = (huber_loss + 0.1 * sob_loss) / accumulation_steps
+            # Combined: L1 + temporal + spatial
+            total_loss = (l1_loss + 10.0 * temporal_loss + 0.5 * sob_loss) / accumulation_steps
 
         # Diagnostics (no gradients)
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys)
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
-            train_loss_acc += huber_loss.item()
+            train_loss_acc += l1_loss.item()
 
         # Backpropagate (accumulates gradients)
         scaler.scale(total_loss).backward()
@@ -307,7 +316,7 @@ for ep in range(cfg.training.epochs):
     
     print(f"\nEpoch {ep} | Time: {duration:.1f}s | LR: {current_lr:.2e}")
     print(f"  Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
-    print(f"  Huber Loss: {avg_loss:.4f}")
+    print(f"  MAE Loss (physical): {avg_loss:.4f}")
     print(f"  Grad Norm: {last_grad_norm:.4f} | Scaler Scale: {scaler.get_scale():.0f}")
     print(f"  Val Pred (phys): mean={pred_phys.mean().item():.1f} max={pred_phys.max().item():.1f} neg%={pred_neg_pct:.1f}%")
     print(f"  Sharpness Ratio: {sharpness_ratio:.4f}")
