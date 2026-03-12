@@ -3,7 +3,7 @@
 # =========================
 
 torch>=2.0          # PyTorch core (training, autograd, FFTs, GPU/CPU)
-triton             
+             
 numpy               # Multidimensional array handling
 scipy               # Scientific routines, IO
 pandas              # Data handling

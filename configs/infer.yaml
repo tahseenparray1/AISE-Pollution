@@ -2,11 +2,11 @@ experiment:
   name: baseline
 
 paths:
-  input_loc: /kaggle/input/competitions/aisehack-theme-2/test_in/
-  checkpoint: /kaggle/working/fno_baseline_best.pt
-  output_loc: /kaggle/working/
-  stats_path: /kaggle/working/grid_robust_stats.npy
-  topo_path: /kaggle/working/topo_proxy.npy
+  input_loc: test_in/
+  checkpoint: fno_baseline_best.pt
+  output_loc: ./
+  stats_path: grid_robust_stats.npy
+  topo_path: topo_proxy.npy
 
 data:
   dataset: test_in
