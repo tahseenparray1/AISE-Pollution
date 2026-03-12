@@ -130,6 +130,9 @@ model = FNO2D(
     time_input=cfg.data.time_input
 ).to(device)
 
+print("Compiling model for faster execution...")
+model = torch.compile(model)
+
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
 
 # ==========================================

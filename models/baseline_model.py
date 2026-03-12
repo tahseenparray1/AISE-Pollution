@@ -122,9 +122,9 @@ class FNO2D(nn.Module):
     def forward(self, x):
         b, nx, ny, _ = x.shape
         # Extract last known PM2.5 state for residual connection
-        last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2) 
+        last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2).contiguous()
         
-        x_in = x.permute(0, 3, 1, 2)
+        x_in = x.permute(0, 3, 1, 2).contiguous()
         grid = self.get_grid(b, nx, ny, x.device) 
         x_in = torch.cat([x_in, grid], dim=1) 
         
