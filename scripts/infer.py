@@ -104,10 +104,13 @@ class TestDataLoader(torch.utils.data.Dataset):
         
         # 5. Build 3D tensor: (C, T, H, W)
         
-        # PM2.5: (1, 26, H, W) — zero-pad hours 10-25
+        # PM2.5: (1, 26, H, W) — fill hours 10-25 with normalized zero
+        # CRITICAL: np.zeros is NOT true zero in normalized space!
+        # True zero = (log1p(0) - median) / iqr = -median/iqr
         pm25_norm = normalized['cpm25']  # (10, H, W)
-        pm25_full = np.zeros((self.total_time, self.S1, self.S2), dtype=np.float32)
-        pm25_full[:self.time_in] = pm25_norm  # only first 10 hours
+        zero_val = (0.0 - self.stats['cpm25']['median']) / self.stats['cpm25']['iqr']  # (H, W)
+        pm25_full = np.broadcast_to(zero_val[np.newaxis, :, :], (self.total_time, self.S1, self.S2)).copy()
+        pm25_full[:self.time_in] = pm25_norm  # overwrite first 10 hours with real data
         pm25_ch = torch.from_numpy(pm25_full).unsqueeze(0)  # (1, 26, H, W)
         
         # Temporal weather: (10, 26, H, W)

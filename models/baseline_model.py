@@ -60,10 +60,14 @@ class WNOBlock3D(nn.Module):
         # 3D spectral mixer: mixes wavelet sub-bands AND time simultaneously
         self.spectral_mixer = nn.Conv3d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
         
-        # 3D spatial-temporal mixer: kernel (3,5,5) sweeps across time + space
-        # This is where the "arrow of time" enters — the model learns how
-        # pollution advects from hour t to hour t+1 across the spatial grid
-        self.spatial_mixer = nn.Conv3d(width, width, kernel_size=(3, 5, 5), padding=(1, 2, 2), groups=width)
+        # 3D spatial-temporal mixer: decoupled for VRAM efficiency
+        # Temporal (3,1,1) learns hour-to-hour advection
+        # Spatial (1,5,5) learns large-kernel spatial mixing
+        # Same receptive field as (3,5,5) but ~60% less VRAM
+        self.spatial_mixer = nn.Sequential(
+            nn.Conv3d(width, width, kernel_size=(3, 1, 1), padding=(1, 0, 0), groups=width),
+            nn.Conv3d(width, width, kernel_size=(1, 5, 5), padding=(0, 2, 2), groups=width)
+        )
         
         self.pointwise = nn.Conv3d(width, width, 1)
         self.norm = nn.GroupNorm(4, width)

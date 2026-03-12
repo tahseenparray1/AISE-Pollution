@@ -37,13 +37,16 @@ def to_physical(x_norm):
     return torch.expm1(log_val)
 
 def sobolev_loss(pred_log, targ_log):
-    """Sobolev H1 gradient loss: penalizes blurry predictions by matching spatial derivatives."""
-    # Spatial gradients along X (height dimension)
-    dx_p = pred_log[..., 1:, :] - pred_log[..., :-1, :]
-    dx_t = targ_log[..., 1:, :] - targ_log[..., :-1, :]
-    # Spatial gradients along Y (width dimension)
-    dy_p = pred_log[..., 1:] - pred_log[..., :-1]
-    dy_t = targ_log[..., 1:] - targ_log[..., :-1]
+    """
+    Sobolev H1 gradient loss: penalizes blurry predictions by matching spatial derivatives.
+    Assumes inputs are (B, H, W, T). H is dim 1, W is dim 2.
+    """
+    # Spatial gradients along H (dim 1)
+    dx_p = pred_log[:, 1:, :, :] - pred_log[:, :-1, :, :]
+    dx_t = targ_log[:, 1:, :, :] - targ_log[:, :-1, :, :]
+    # Spatial gradients along W (dim 2)
+    dy_p = pred_log[:, :, 1:, :] - pred_log[:, :, :-1, :]
+    dy_t = targ_log[:, :, 1:, :] - targ_log[:, :, :-1, :]
     return F.mse_loss(dx_p, dx_t) + F.mse_loss(dy_p, dy_t)
 
 # ==========================================
@@ -95,11 +98,16 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         window = self.data[start : start + self.total_time].clone()
         # window shape: (26, H, W, V+1)
         
-        # 1. PM2.5 across all 26 hours: zero-mask hours 10-25 (future)
-        # Shape: (1, 26, H, W)
+        # 1. PM2.5 across all 26 hours: mask hours 10-25 (future)
+        # CRITICAL: Use normalized zero, not literal 0.0!
+        # In normalized space, 0.0 physical PM2.5 = (log1p(0) - median) / iqr = -median/iqr
+        zero_val = torch.tensor(
+            (0.0 - stats['cpm25']['median']) / stats['cpm25']['iqr'],
+            dtype=torch.float32
+        )  # (H, W) grid of normalized zeros
         pm_full = window[:, ..., self.target_idx]  # (26, H, W)
-        pm_full[self.time_in:] = 0.0  # zero out future hours (hours 10-25)
-        pm_full = pm_full.permute(0, 1, 2).unsqueeze(0)  # (1, 26, H, W)
+        pm_full[self.time_in:] = zero_val  # fill with true normalized zero
+        pm_full = pm_full.unsqueeze(0)  # (1, 26, H, W)
         
         # 2. Dynamic temporal weather: 10 features across 26 hours
         # Shape: (10, 26, H, W)
