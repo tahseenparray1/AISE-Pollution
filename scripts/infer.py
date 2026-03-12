@@ -119,7 +119,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         static_tensor = torch.from_numpy(static_stack).mean(dim=1).permute(1, 2, 0)
         
         # Topo
-        topo_tensor = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
+        topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
         
         # Combine (10 + 260 + 7 + 1 = 278 Channels)
         x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
@@ -144,7 +144,8 @@ model = FNO2D(
     in_channels=in_channels,
     time_out=cfg_train.data.time_out,
     width=cfg_train.model.width,
-    modes=cfg_train.model.modes
+    modes=cfg_train.model.modes,
+    time_input=cfg_train.data.time_input
 ).to(device)
 
 checkpoint_path = cfg_train.paths.model_save_path.replace(".pt", "_best.pt")

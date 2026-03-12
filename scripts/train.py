@@ -57,11 +57,24 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         self.total_time = cfg.data.total_time
         self.S1, self.S2 = cfg.data.S1, cfg.data.S2
         
-        # Explicit Index Mapping based on prepare_dataset.py array structure
-        # Index 0: cpm25
-        self.temporal_idx = [1, 2, 3, 4, 5, 6, 7, 15, 16, 17] # 10 Weather & Derived features
-        self.static_idx = [8, 9, 10, 11, 12, 13, 14] # 7 Emission features
-        self.topo_idx = 18
+        # Build index mapping dynamically from feature order in prepare_dataset.yaml
+        # Feature order: met_variables_raw + emission_variables_raw + derived_features + [topo]
+        all_features = (cfg.features.met_variables 
+                       + cfg.features.emission_variables 
+                       + cfg.features.derived_variables)
+        
+        # Target variable index (robust against YAML reordering)
+        assert 'cpm25' in all_features, "Target variable 'cpm25' must be in met_variables!"
+        self.target_idx = all_features.index('cpm25')
+        
+        # Temporal weather feature indices (met vars except cpm25, plus derived vars)
+        self.temporal_idx = [i for i, f in enumerate(all_features) 
+                           if f != 'cpm25' and f not in cfg.features.emission_variables]
+        # Static emission feature indices
+        self.static_idx = [i for i, f in enumerate(all_features) 
+                          if f in cfg.features.emission_variables]
+        # Topography is the last channel appended in prepare_dataset.py
+        self.topo_idx = len(all_features)
 
     def __len__(self): 
         return len(self.valid_starts)
@@ -71,7 +84,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         window = self.data[start : start + self.total_time].clone() 
         
         # 1. PM2.5 Historical Context (10 channels)
-        pm_hist = window[:self.time_in, ..., 0].permute(1, 2, 0) 
+        pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
         
         # 2. Dynamic Temporal Weather (10 features * 26 hours = 260 channels)
         temporal_weather = window[:, ..., self.temporal_idx]
@@ -86,8 +99,8 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # Combine everything (10 + 260 + 7 + 1 = 278 Channels)
         x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
         
-        # Target
-        y = window[self.time_in:, ..., 0].permute(1, 2, 0)
+        # Target (uses same config-driven index as input)
+        y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
         return x, y
 
 train_ds = FastInMemoryDataset("train", cfg)
@@ -111,7 +124,8 @@ model = FNO2D(
     in_channels=in_channels, 
     time_out=cfg.data.time_out, 
     width=cfg.model.width, 
-    modes=cfg.model.modes
+    modes=cfg.model.modes,
+    time_input=cfg.data.time_input
 ).to(device)
 
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
@@ -136,7 +150,12 @@ for ep in range(cfg.training.epochs):
     for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
         x, y = x.to(device), y.to(device)
         
-        x = x + torch.randn_like(x) * 0.01
+        # FIX #2: Apply noise only to continuous features, protecting:
+        # - Topography (last channel): static elevation proxy from PSFC
+        # - Rain mask (binary 0/1): within temporal channels
+        noise = torch.randn_like(x) * 0.01
+        noise[..., -1] = 0.0  # Zero out noise for topography (last channel)
+        x = x + noise
         
         optimizer.zero_grad(set_to_none=True)
         
