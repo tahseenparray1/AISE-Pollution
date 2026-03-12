@@ -108,10 +108,10 @@ features:
 
 model:
   modes: 8
-  width: 128
+  width: 32
 
 training:
-  batch_size: 4
+  batch_size: 2
   epochs: 150
   lr: 1e-3
   weight_decay: 1e-5
@@ -126,7 +126,6 @@ training:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 
 class HaarWavelet2D(nn.Module):
@@ -287,11 +286,11 @@ class FNO2D(nn.Module):
         # Encode
         x_feat = self.input_encoder(x_in)  # (B, width, T, H, W)
         
-        # 3D WNO blocks with Gradient Checkpointing to save VRAM
-        x_wno = checkpoint(self.block0, x_feat, use_reentrant=False)
-        x_wno = checkpoint(self.block1, x_wno, use_reentrant=False)
-        x_wno = checkpoint(self.block2, x_wno, use_reentrant=False)
-        x_wno = checkpoint(self.block3, x_wno, use_reentrant=False)
+        # --- FAST DIRECT EXECUTION (No Checkpointing) ---
+        x_wno = self.block0(x_feat)
+        x_wno = self.block1(x_wno)
+        x_wno = self.block2(x_wno)
+        x_wno = self.block3(x_wno)
         
         # Decode to single-channel 26-hour prediction
         x_wno = F.gelu(self.fc1(x_wno))   # (B, 128, T, H, W)
@@ -820,8 +819,10 @@ print(f"{'='*60}\n")
 
 # Compile model for massive speedup if PyTorch 2.0+
 try:
-    print("Compiling model graph with torch.compile...")
-    model = torch.compile(model)
+    print("Compiling model graph with torch.compile (mode='reduce-overhead')...")
+    # Use "reduce-overhead" mode to optimize the graph without
+    # triggering advanced SM-heavy auto-tuners that crash older GPUs like T4.
+    model = torch.compile(model, mode="reduce-overhead")
 except Exception as e:
     print(f"torch.compile failed (normal on older PyTorch): {e}")
 

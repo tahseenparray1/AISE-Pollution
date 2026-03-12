@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 
 
 class HaarWavelet2D(nn.Module):
@@ -162,11 +161,11 @@ class FNO2D(nn.Module):
         # Encode
         x_feat = self.input_encoder(x_in)  # (B, width, T, H, W)
         
-        # 3D WNO blocks with Gradient Checkpointing to save VRAM
-        x_wno = checkpoint(self.block0, x_feat, use_reentrant=False)
-        x_wno = checkpoint(self.block1, x_wno, use_reentrant=False)
-        x_wno = checkpoint(self.block2, x_wno, use_reentrant=False)
-        x_wno = checkpoint(self.block3, x_wno, use_reentrant=False)
+        # --- FAST DIRECT EXECUTION (No Checkpointing) ---
+        x_wno = self.block0(x_feat)
+        x_wno = self.block1(x_wno)
+        x_wno = self.block2(x_wno)
+        x_wno = self.block3(x_wno)
         
         # Decode to single-channel 26-hour prediction
         x_wno = F.gelu(self.fc1(x_wno))   # (B, 128, T, H, W)

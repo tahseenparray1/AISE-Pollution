@@ -185,8 +185,10 @@ print(f"{'='*60}\n")
 
 # Compile model for massive speedup if PyTorch 2.0+
 try:
-    print("Compiling model graph with torch.compile...")
-    model = torch.compile(model)
+    print("Compiling model graph with torch.compile (mode='reduce-overhead')...")
+    # Use "reduce-overhead" mode to optimize the graph without
+    # triggering advanced SM-heavy auto-tuners that crash older GPUs like T4.
+    model = torch.compile(model, mode="reduce-overhead")
 except Exception as e:
     print(f"torch.compile failed (normal on older PyTorch): {e}")
 
