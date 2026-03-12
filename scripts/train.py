@@ -203,19 +203,20 @@ for ep in range(cfg.training.epochs):
         pred_phys = to_physical(out)
         targ_phys = to_physical(y)
         
-        # 1. MAE (L1) - Linear penalty prevents background drift
-        l1_loss = F.l1_loss(pred_phys, targ_phys)
+        # 1. Huber Loss with high delta (Acts like MSE for background, safe for spikes)
+        # Directly correlates with Kaggle's RMSE metric
+        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=30.0)
         
-        # 2. Temporal Consistency - Forces hour-to-hour trajectory to match reality
+        # 2. Temporal Consistency (Keep this to force realistic physics)
         temp_pred = pred_phys[:, :, :, 1:] - pred_phys[:, :, :, :-1]
         temp_targ = targ_phys[:, :, :, 1:] - targ_phys[:, :, :, :-1]
         temporal_loss = F.l1_loss(temp_pred, temp_targ)
         
-        # 3. Spatial Gradient (Plume edges)
+        # 3. Spatial Gradient (Keeps plume edges sharp)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
         # Blended Total Loss
-        total_loss = l1_loss + 2.0 * temporal_loss + 0.5 * loss_grad
+        total_loss = huber_loss + (1.5 * temporal_loss) + (0.5 * loss_grad)
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
