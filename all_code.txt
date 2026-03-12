@@ -605,6 +605,17 @@ def to_physical(x_norm):
     log_val = (x_norm * pm_iqr_tensor) + pm_median_tensor
     return torch.expm1(log_val)
 
+def sobolev_loss(pred_log, targ_log):
+    """
+    Sobolev H1 gradient loss: penalizes blurry predictions by matching spatial derivatives.
+    Assumes inputs are (B, H, W, T). H is dim 1, W is dim 2.
+    """
+    dx_p = pred_log[:, 1:, :, :] - pred_log[:, :-1, :, :]
+    dx_t = targ_log[:, 1:, :, :] - targ_log[:, :-1, :, :]
+    dy_p = pred_log[:, :, 1:, :] - pred_log[:, :, :-1, :]
+    dy_t = targ_log[:, :, 1:, :] - targ_log[:, :, :-1, :]
+    return F.mse_loss(dx_p, dx_t) + F.mse_loss(dy_p, dy_t)
+
 # ==========================================
 # 3. DATA LOADER (Time-as-Channel)
 # ==========================================
