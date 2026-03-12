@@ -183,15 +183,6 @@ print(f"  PM25 Median Stats:    min={stats['cpm25']['median'].min():.4f}  max={s
 print(f"  PM25 IQR Stats:       min={stats['cpm25']['iqr'].min():.4f}  max={stats['cpm25']['iqr'].max():.4f}")
 print(f"{'='*60}\n")
 
-# Compile model for massive speedup if PyTorch 2.0+
-try:
-    print("Compiling model graph with torch.compile (mode='reduce-overhead')...")
-    # Use "reduce-overhead" mode to optimize the graph without
-    # triggering advanced SM-heavy auto-tuners that crash older GPUs like T4.
-    model = torch.compile(model, mode="reduce-overhead")
-except Exception as e:
-    print(f"torch.compile failed (normal on older PyTorch): {e}")
-
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
 
@@ -206,6 +197,8 @@ scaler = torch.amp.GradScaler('cuda')
 best_val_rmse = float('inf')
 log = []
 
+accumulation_steps = 4  # 4 steps * batch_size 4 = Effective Batch Size 16
+
 for ep in range(cfg.training.epochs):
     model.train()
     t_start = time.time()
@@ -214,7 +207,9 @@ for ep in range(cfg.training.epochs):
     train_sobolev_acc = 0.0
     batch_count = 0
 
-    for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
+    optimizer.zero_grad(set_to_none=True)  # Zero out at start of epoch
+
+    for i, (x, y) in enumerate(tqdm(train_loader, desc=f"Epoch {ep}")):
         x, y = x.to(device), y.to(device)
         
         # --- DEBUG: First-batch diagnostic on epoch 0 ---
@@ -235,8 +230,6 @@ for ep in range(cfg.training.epochs):
         noise[:, -1, :, :, :] = 0.0  # don't noise topography (last channel)
         x = x + noise
         
-        optimizer.zero_grad(set_to_none=True)
-        
         with torch.amp.autocast('cuda'):
             out = model(x)  # out: (B, H, W, 16)
             
@@ -251,8 +244,8 @@ for ep in range(cfg.training.epochs):
             # --- SOBOLEV GRADIENT LOSS ---
             sob_loss = sobolev_loss(out, y)
             
-            # Combined: weighted MSE + Sobolev
-            total_loss = weighted_mse + 0.1 * sob_loss
+            # Combined: weighted MSE + Sobolev (divided by accumulation steps)
+            total_loss = (weighted_mse + 0.1 * sob_loss) / accumulation_steps
 
         # Diagnostics (no gradients)
         with torch.no_grad():
@@ -262,12 +255,17 @@ for ep in range(cfg.training.epochs):
             train_wmse_acc += weighted_mse.item()
             train_sobolev_acc += sob_loss.item()
 
-        # Backpropagate
+        # Backpropagate (accumulates gradients)
         scaler.scale(total_loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(optimizer)
-        scaler.update()
+        
+        # Only step optimizer every accumulation_steps batches
+        if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            
         batch_count += 1
 
     # --- SWA SCHEDULER STEP ---
