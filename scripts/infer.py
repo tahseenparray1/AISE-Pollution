@@ -114,14 +114,14 @@ class TestDataLoader(torch.utils.data.Dataset):
         temporal_stack = np.stack(temporal_feats, axis=0)
         temporal_tensor = torch.from_numpy(temporal_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
-        # Static: Stack -> Mean across time -> (Channels, Time, H, W) -> (Channels, H, W) -> (H, W, Channels)
-        static_stack = np.stack(static_feats, axis=0)
-        static_tensor = torch.from_numpy(static_stack).mean(dim=1).permute(1, 2, 0)
+        # Static: DYNAMIC emissions (7 features * 26 hours = 182 channels)
+        static_stack = np.stack(static_feats, axis=0)  # (7, 26, H, W)
+        static_tensor = torch.from_numpy(static_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
         # Topo
         topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
         
-        # Combine (10 + 260 + 7 + 1 = 278 Channels)
+        # Combine (10 + 260 + 182 + 1 = 453 Channels)
         x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
 
         return x
@@ -134,10 +134,10 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # ==========================================
 pm_channels = cfg_train.data.time_input
 temporal_channels = 10 * cfg_train.data.total_time 
-static_channels = 7 
+emission_channels = 7 * cfg_train.data.total_time  # Dynamic emissions
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+in_channels = pm_channels + temporal_channels + emission_channels + topo_channels
 
 print(f"Building WNO Model with optimized {in_channels} input channels...")
 model = FNO2D(

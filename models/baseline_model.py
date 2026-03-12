@@ -107,6 +107,10 @@ class FNO2D(nn.Module):
         
         self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
         self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1) 
+        
+        # Zero-init output: epoch 0 starts at persistence forecast (out=0 → pred=last_pm25)
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
 
     def get_grid(self, b, nx, ny, device):
         gridx = torch.linspace(0, 1, nx, device=device)

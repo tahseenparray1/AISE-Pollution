@@ -221,6 +221,10 @@ class FNO2D(nn.Module):
         
         self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
         self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1) 
+        
+        # Zero-init output: epoch 0 starts at persistence forecast (out=0 → pred=last_pm25)
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
 
     def get_grid(self, b, nx, ny, device):
         gridx = torch.linspace(0, 1, nx, device=device)
@@ -378,14 +382,14 @@ class TestDataLoader(torch.utils.data.Dataset):
         temporal_stack = np.stack(temporal_feats, axis=0)
         temporal_tensor = torch.from_numpy(temporal_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
-        # Static: Stack -> Mean across time -> (Channels, Time, H, W) -> (Channels, H, W) -> (H, W, Channels)
-        static_stack = np.stack(static_feats, axis=0)
-        static_tensor = torch.from_numpy(static_stack).mean(dim=1).permute(1, 2, 0)
+        # Static: DYNAMIC emissions (7 features * 26 hours = 182 channels)
+        static_stack = np.stack(static_feats, axis=0)  # (7, 26, H, W)
+        static_tensor = torch.from_numpy(static_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
         # Topo
         topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
         
-        # Combine (10 + 260 + 7 + 1 = 278 Channels)
+        # Combine (10 + 260 + 182 + 1 = 453 Channels)
         x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
 
         return x
@@ -398,10 +402,10 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # ==========================================
 pm_channels = cfg_train.data.time_input
 temporal_channels = 10 * cfg_train.data.total_time 
-static_channels = 7 
+emission_channels = 7 * cfg_train.data.total_time  # Dynamic emissions
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+in_channels = pm_channels + temporal_channels + emission_channels + topo_channels
 
 print(f"Building WNO Model with optimized {in_channels} input channels...")
 model = FNO2D(
@@ -668,14 +672,16 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         temporal_weather = window[:, ..., self.temporal_idx]
         temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
         
-        # 3. Static Emissions (Mean across the 26 hours to collapse to 7 spatial channels)
-        static_emissions = window[:, ..., self.static_idx].mean(dim=0)
+        # 3. DYNAMIC Emissions (7 features * 26 hours = 182 channels)
+        # Preserves diurnal cycle: NOx rush-hour, biogenic sunlight peaks
+        dynamic_emissions = window[:, ..., self.static_idx]
+        dynamic_emissions = dynamic_emissions.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
         
         # 4. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        # Combine everything (10 + 260 + 7 + 1 = 278 Channels)
-        x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
+        # Combine everything (10 + 260 + 182 + 1 = 453 Channels)
+        x = torch.cat((pm_hist, temporal_weather, dynamic_emissions, topo), dim=-1)
         
         # Target (uses same config-driven index as input)
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
@@ -691,12 +697,12 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # 4. MODEL & OPTIMIZER
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time # 10 dynamic features
-static_channels = 7 # 7 emission proxy maps
+temporal_channels = 10 * cfg.data.total_time # 10 dynamic weather features
+emission_channels = 7 * cfg.data.total_time  # 7 dynamic emission features (diurnal cycle preserved!)
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
-print(f"Building Model with optimized {in_channels} input channels (Massive memory saving!)...")
+in_channels = pm_channels + temporal_channels + emission_channels + topo_channels
+print(f"Building WNO with {in_channels} input channels (PM:{pm_channels} + Weather:{temporal_channels} + Emissions:{emission_channels} + Topo:{topo_channels})...")
 
 model = FNO2D(
     in_channels=in_channels, 
@@ -737,22 +743,24 @@ for ep in range(cfg.training.epochs):
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Single Forward Pass (Direct Multi-Step)
         out = model(x)
         
         pred_phys = to_physical(out)
         targ_phys = to_physical(y)
         
-        # --- NEW LOSS FORMULATION ---
-        # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+        # 1. MAE (L1) - Linear penalty prevents background drift
+        l1_loss = F.l1_loss(pred_phys, targ_phys)
         
-        # 2. Spatial Gradient Loss (Keeps plume edges sharp)
+        # 2. Temporal Consistency - Forces hour-to-hour trajectory to match reality
+        temp_pred = pred_phys[:, :, :, 1:] - pred_phys[:, :, :, :-1]
+        temp_targ = targ_phys[:, :, :, 1:] - targ_phys[:, :, :, :-1]
+        temporal_loss = F.l1_loss(temp_pred, temp_targ)
+        
+        # 3. Spatial Gradient (Plume edges)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
-        # 3. Blended Total Loss
-        total_loss = huber_loss + 0.1 * loss_grad
-
+        # Blended Total Loss
+        total_loss = l1_loss + 2.0 * temporal_loss + 0.5 * loss_grad
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
