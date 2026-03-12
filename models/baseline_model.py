@@ -6,11 +6,9 @@ class HaarWavelet2D(nn.Module):
     """ Native PyTorch 2D Haar Discrete Wavelet Transform """
     def __init__(self, in_channels):
         super().__init__()
-        # Haar wavelet filters: Low-Low, Low-High, High-Low, High-High
         h0 = [1/2, 1/2]
         h1 = [-1/2, 1/2]
         
-        # Create 2D filters via outer product
         ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
         lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
         hl = torch.tensor([[h0[0]*h1[0], h0[0]*h1[1]], [h0[1]*h1[0], h0[1]*h1[1]]])
@@ -21,7 +19,6 @@ class HaarWavelet2D(nn.Module):
         self.in_channels = in_channels
         
     def forward(self, x):
-        # Applies DWT using stride 2 convolution
         return F.conv2d(x, self.filters, stride=2, groups=self.in_channels)
 
 class InverseHaarWavelet2D(nn.Module):
@@ -41,105 +38,140 @@ class InverseHaarWavelet2D(nn.Module):
         self.in_channels = in_channels
         
     def forward(self, x):
-        # Reconstructs using transposed convolution
         return F.conv_transpose2d(x, self.filters, stride=2, groups=self.in_channels)
 
-class WNOBlock(nn.Module):
-    """ Wavelet Neural Operator Block with Extended Receptive Field """
+class WNOBlock3D(nn.Module):
+    """
+    3D Spatiotemporal Wavelet Neural Operator Block.
+    
+    Uses 2D Haar wavelets for spatial multi-resolution (applied per-timestep),
+    then Conv3d for temporal-spatial coupling.
+    
+    Input/Output shape: (B, width, T, H, W)
+    """
     def __init__(self, width):
         super().__init__()
         self.width = width
+        
+        # Spatial wavelets (applied per-timestep by folding T into batch)
         self.dwt = HaarWavelet2D(width)
         self.idwt = InverseHaarWavelet2D(width)
         
-        # Mixes the 4 wavelet sub-bands (LL, LH, HL, HH)
-        self.spectral_mixer = nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
+        # 3D spectral mixer: mixes wavelet sub-bands AND time simultaneously
+        self.spectral_mixer = nn.Conv3d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
         
-        # FIX #4: Depthwise conv with large kernel to expand receptive field
-        # Enables modeling long-range wind advection across the 140x124 spatial grid
-        self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=2, groups=width)
+        # 3D spatial-temporal mixer: kernel (3,5,5) sweeps across time + space
+        # This is where the "arrow of time" enters — the model learns how
+        # pollution advects from hour t to hour t+1 across the spatial grid
+        self.spatial_mixer = nn.Conv3d(width, width, kernel_size=(3, 5, 5), padding=(1, 2, 2), groups=width)
         
-        self.pointwise = nn.Conv2d(width, width, 1)
+        self.pointwise = nn.Conv3d(width, width, 1)
         self.norm = nn.GroupNorm(4, width)
 
     def forward(self, x):
+        # x: (B, C, T, H, W)
+        B, C, T, H, W = x.shape
         x_norm = self.norm(x)
         
-        # 1. Decompose to Wavelet domain
-        x_w = self.dwt(x_norm)
+        # 1. Fold T into batch for 2D Haar: (B*T, C, H, W)
+        x_flat = x_norm.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
         
-        # 2. Mix frequencies
+        # 2. Spatial wavelet decomposition (per-timestep)
+        x_w = self.dwt(x_flat)  # (B*T, C*4, H/2, W/2)
+        
+        # 3. Unfold back to 3D: (B, C*4, T, H/2, W/2)
+        _, C4, Hh, Wh = x_w.shape
+        x_w = x_w.reshape(B, T, C4, Hh, Wh).permute(0, 2, 1, 3, 4)
+        
+        # 4. 3D spectral mixing (mixes sub-bands + time)
         x_w = self.spectral_mixer(x_w)
         
-        # 3. Reconstruct back to Spatial domain
-        out_w = self.idwt(x_w)
+        # 5. Fold + Inverse Haar + unfold
+        x_w = x_w.permute(0, 2, 1, 3, 4).reshape(B * T, C4, Hh, Wh)
+        out_w = self.idwt(x_w)  # (B*T, C, H, W)
+        out_w = out_w.reshape(B, T, C, H, W).permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
         
-        # 4. Apply large-kernel spatial mixing for extended receptive field
+        # 6. 3D spatial-temporal mixing: the temporal advection kernel
         out_w = self.spatial_mixer(out_w)
         
-        # 5. Add pointwise mixing and residual
+        # 7. Pointwise + residual
         out = out_w + self.pointwise(x_norm)
         return x + F.gelu(out)
 
+
 class FNO2D(nn.Module):
-    # Renamed internal structure to WNO, kept class name FNO2D to prevent breaking your train.py imports!
-    def __init__(self, in_channels, time_out=16, width=64, modes=None, time_input=10):
+    """
+    3D Spatiotemporal Wavelet Neural Operator.
+    
+    Name kept as FNO2D for backward-compatible imports.
+    
+    Input:  (B, C_in, T, H, W) — 3D spatiotemporal field
+    Output: (B, H, W, time_out) — predicted PM2.5 for future hours
+    """
+    def __init__(self, in_channels, time_out=16, width=64, modes=None, 
+                 time_input=10, time_steps=26):
         super().__init__()
         self.width = width
         self.time_out = time_out
-        self.time_input = time_input  # Number of PM2.5 history hours (for residual connection)
+        self.time_input = time_input
+        self.time_steps = time_steps
         
-        # Encode ablated input down to 'width'
-        # FIX #3: Use standard Dropout instead of Dropout2d to avoid
-        # dropping entire temporal channels (e.g. "Hour 5 Wind Speed")
+        # 3D Input encoder: C_in + 3 grid coords → width
         self.input_encoder = nn.Sequential(
-            nn.Conv2d(in_channels + 2, width, kernel_size=1),
+            nn.Conv3d(in_channels + 3, width, kernel_size=1),
             nn.GroupNorm(4, width),
             nn.GELU(),
             nn.Dropout(p=0.05)
         )
         
-        # Stack WNO blocks instead of FNO blocks
-        self.block0 = WNOBlock(self.width)
-        self.block1 = WNOBlock(self.width)
-        self.block2 = WNOBlock(self.width)
-        self.block3 = WNOBlock(self.width)
+        # 4 WNO3D blocks
+        self.block0 = WNOBlock3D(self.width)
+        self.block1 = WNOBlock3D(self.width)
+        self.block2 = WNOBlock3D(self.width)
+        self.block3 = WNOBlock3D(self.width)
         
-        self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
-        self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1) 
+        # Output decoder: width → 1 channel (PM2.5)
+        self.fc1 = nn.Conv3d(self.width, 128, kernel_size=1)
+        self.fc2 = nn.Conv3d(128, 1, kernel_size=1)
 
-    def get_grid(self, b, nx, ny, device):
-        gridx = torch.linspace(0, 1, nx, device=device)
-        gridy = torch.linspace(0, 1, ny, device=device)
-        gridx = gridx.view(1, 1, nx, 1).repeat(b, 1, 1, ny)
-        gridy = gridy.view(1, 1, 1, ny).repeat(b, 1, nx, 1)
-        return torch.cat((gridx, gridy), dim=1) 
+    def get_grid(self, b, t, nx, ny, device):
+        """3D positional grid: (gridx, gridy, gridt) → (B, 3, T, H, W)"""
+        gridx = torch.linspace(0, 1, nx, device=device).view(1, 1, 1, nx, 1).expand(b, 1, t, nx, ny)
+        gridy = torch.linspace(0, 1, ny, device=device).view(1, 1, 1, 1, ny).expand(b, 1, t, nx, ny)
+        gridt = torch.linspace(0, 1, t, device=device).view(1, 1, t, 1, 1).expand(b, 1, t, nx, ny)
+        return torch.cat((gridx, gridy, gridt), dim=1)  # (B, 3, T, H, W)
 
     def forward(self, x):
-        b, nx, ny, _ = x.shape
-        # Extract last known PM2.5 state for residual connection
-        last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2) 
+        # x: (B, C_in, T, H, W)
+        b, c, t, nx, ny = x.shape
         
-        x_in = x.permute(0, 3, 1, 2)
-        grid = self.get_grid(b, nx, ny, x.device) 
-        x_in = torch.cat([x_in, grid], dim=1) 
+        # Extract last known PM2.5 for residual (channel 0 = PM2.5, hour 9 = last input)
+        # PM2.5 is channel index 0 (first channel in the data loader)
+        last_pm25 = x[:, 0, self.time_input - 1, :, :]  # (B, H, W)
         
-        x_feat = self.input_encoder(x_in)
+        # Append 3D positional grid
+        grid = self.get_grid(b, t, nx, ny, x.device)  # (B, 3, T, H, W)
+        x_in = torch.cat([x, grid], dim=1)  # (B, C_in+3, T, H, W)
         
-        # WNO Spatial Mixing (No padding needed, 140 and 124 divide evenly by 2!)
+        # Encode
+        x_feat = self.input_encoder(x_in)  # (B, width, T, H, W)
+        
+        # 3D WNO blocks
         x_wno = self.block0(x_feat)
         x_wno = self.block1(x_wno)
         x_wno = self.block2(x_wno)
         x_wno = self.block3(x_wno)
         
-        # Decode to DELTA (network learns the change from current state)
-        x_wno = F.gelu(self.fc1(x_wno))
-        out = self.fc2(x_wno) 
+        # Decode to single-channel 26-hour prediction
+        x_wno = F.gelu(self.fc1(x_wno))   # (B, 128, T, H, W)
+        out = self.fc2(x_wno)              # (B, 1, T, H, W)
+        out = out.squeeze(1)               # (B, T, H, W)
         
-        # FIX #1: RESIDUAL CONNECTION
-        # 'out' shape is (B, 16, H, W). 'last_pm25' shape is (B, 1, H, W).
-        # Broadcasting adds the last known PM2.5 state to all 16 future steps.
-        # This lets the network learn DELTA (change) instead of absolute values.
-        out = out + last_pm25
+        # Slice future hours: hours 10-25 = the 16 prediction targets
+        out = out[:, self.time_input:, :, :]  # (B, 16, H, W)
         
+        # Residual connection: add last known PM2.5 to all future steps
+        out = out + last_pm25.unsqueeze(1)  # broadcast (B, 1, H, W) → (B, 16, H, W)
+        
+        # Return in (B, H, W, T_out) format for compatibility with loss code
         return out.permute(0, 2, 3, 1)
