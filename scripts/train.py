@@ -20,6 +20,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(0)
 np.random.seed(0)
 
+# Hardware optimization for static grid sizes
+torch.backends.cudnn.benchmark = True
+
 S1, S2 = cfg.data.S1, cfg.data.S2
 
 # ==========================================
@@ -105,7 +108,9 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
             (0.0 - stats['cpm25']['median']) / stats['cpm25']['iqr'],
             dtype=torch.float32
         )  # (H, W) grid of normalized zeros
-        pm_full = window[:, ..., self.target_idx]  # (26, H, W)
+        
+        # CRITICAL: Must .clone() so we don't overwrite the original window (which y is extracted from)
+        pm_full = window[:, ..., self.target_idx].clone()  # (26, H, W)
         pm_full[self.time_in:] = zero_val  # fill with true normalized zero
         pm_full = pm_full.unsqueeze(0)  # (1, 26, H, W)
         
@@ -177,6 +182,13 @@ print(f"  Val Samples:          {len(val_ds)}")
 print(f"  PM25 Median Stats:    min={stats['cpm25']['median'].min():.4f}  max={stats['cpm25']['median'].max():.4f}")
 print(f"  PM25 IQR Stats:       min={stats['cpm25']['iqr'].min():.4f}  max={stats['cpm25']['iqr'].max():.4f}")
 print(f"{'='*60}\n")
+
+# Compile model for massive speedup if PyTorch 2.0+
+try:
+    print("Compiling model graph with torch.compile...")
+    model = torch.compile(model)
+except Exception as e:
+    print(f"torch.compile failed (normal on older PyTorch): {e}")
 
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
