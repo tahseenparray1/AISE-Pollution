@@ -121,12 +121,18 @@ class TestDataLoader(torch.utils.data.Dataset):
         # Topo — single global map, identical for all samples
         topo_tensor = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
         
-        # === DECODER: Future temporal (10 features × 16 hours = 160 channels) ===
+        # === DECODER: Future temporal (16 hours × 11 features = 176 channels) ===
         future_temporal = temporal_stack[:, self.time_in:, :, :]
-        future_tensor = torch.from_numpy(np.ascontiguousarray(future_temporal)).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
+        future_tensor = torch.from_numpy(np.ascontiguousarray(future_temporal)).permute(2, 3, 1, 0) # (H, W, 16, 10)
         
-        # Layout: [encoder_inputs (118) | decoder_inputs (160)] = 278 total
-        x = torch.cat((pm25_hist, hist_tensor, static_tensor, topo_tensor, future_tensor), dim=-1)
+        hour_idx = torch.arange(1, 17, dtype=torch.float32).view(1, 1, -1, 1) / 16.0
+        hour_encoding = hour_idx.expand(self.S1, self.S2, 16, 1)
+        
+        future_cond = torch.cat([future_tensor, hour_encoding], dim=-1) # (H, W, 16, 11)
+        future_final = future_cond.reshape(self.S1, self.S2, -1) # (H, W, 176)
+        
+        # Layout: [encoder_inputs (118) | decoder_inputs (176)] = 294 total
+        x = torch.cat((pm25_hist, hist_tensor, static_tensor, topo_tensor, future_final), dim=-1)
 
         return x
 
@@ -140,10 +146,10 @@ pm_channels = cfg_train.data.time_input
 hist_weather_channels = 10 * cfg_train.data.time_input
 static_channels = 7 
 topo_channels = 1
-future_weather_channels = 10 * cfg_train.data.time_out
+future_weather_channels = 11 * cfg_train.data.time_out
 
 enc_channels = pm_channels + hist_weather_channels + static_channels + topo_channels  # 118
-dec_channels = future_weather_channels                                                 # 160
+dec_channels = future_weather_channels                                                 # 176
 
 print(f"Building Encoder-Decoder Model: enc={enc_channels}, dec={dec_channels}")
 model = FNO2D(

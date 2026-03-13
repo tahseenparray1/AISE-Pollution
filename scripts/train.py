@@ -99,12 +99,17 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
         # === DECODER INPUTS (future conditions) ===
-        # 5. Future Weather (16h × 10 features = 160 channels)
-        future_weather = window[self.time_in:, ..., self.temporal_idx]
-        future_weather = future_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
+        # 5. Future Weather (16h × 11 features = 176 channels)
+        future_weather = window[self.time_in:, ..., self.temporal_idx] # (16, H, W, 10)
         
-        # Layout: [encoder_inputs (118) | decoder_inputs (160)] = 278 total
-        x = torch.cat((pm_hist, hist_weather, static_emissions, topo, future_weather), dim=-1)
+        hour_idx = torch.arange(1, self.time_out + 1, dtype=torch.float32).view(-1, 1, 1, 1) / self.time_out
+        hour_encoding = hour_idx.expand(self.time_out, self.S1, self.S2, 1)
+        
+        future_cond = torch.cat([future_weather, hour_encoding], dim=-1)
+        future_tensor = future_cond.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
+        
+        # Layout: [encoder_inputs (118) | decoder_inputs (176)] = 294 total
+        x = torch.cat((pm_hist, hist_weather, static_emissions, topo, future_tensor), dim=-1)
         
         # Target
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
@@ -123,10 +128,10 @@ pm_channels = cfg.data.time_input                           # 10
 hist_weather_channels = 10 * cfg.data.time_input            # 100 (10 features × 10 hours)
 static_channels = 7                                         # 7 emission proxy maps
 topo_channels = 1
-future_weather_channels = 10 * cfg.data.time_out            # 160 (10 features × 16 hours)
+future_weather_channels = 11 * cfg.data.time_out            # 176 (11 features × 16 hours)
 
 enc_channels = pm_channels + hist_weather_channels + static_channels + topo_channels  # 118
-dec_channels = future_weather_channels                                                 # 160
+dec_channels = future_weather_channels                                                 # 176
 print(f"Building Encoder-Decoder Model: enc={enc_channels}, dec={dec_channels}, total={enc_channels + dec_channels}")
 
 model = FNO2D(

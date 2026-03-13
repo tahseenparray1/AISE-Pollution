@@ -59,7 +59,8 @@ class WNOBlock(nn.Module):
         self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=2, groups=width)
         
         self.pointwise = nn.Conv2d(width, width, 1)
-        self.norm = nn.GroupNorm(4, width)
+        # FIX: InstanceNorm prevents cross-channel spatial blurring of localized emission spikes
+        self.norm = nn.InstanceNorm2d(width, affine=True)
 
     def forward(self, x):
         x_norm = self.norm(x)
@@ -104,7 +105,7 @@ class FNO2D(nn.Module):
         # --- ENCODER: learns current pollution state from historical data ---
         self.enc_input = nn.Sequential(
             nn.Conv2d(enc_channels + 2, width, kernel_size=1),  # +2 for spatial grid
-            nn.GroupNorm(4, width),
+            nn.InstanceNorm2d(width, affine=True),
             nn.GELU(),
             nn.Dropout(p=0.05)
         )
@@ -118,6 +119,11 @@ class FNO2D(nn.Module):
         )
         
         # --- DECODER: predicts PM2.5 evolution under future weather conditions ---
+        # Explicit state injection: gives decoder the exact T=0 state to evolve
+        self.dec_input = nn.Sequential(
+            nn.Conv2d(width + 1, width, kernel_size=1),  # +1 for last_pm25
+            nn.GELU()
+        )
         self.dec_block0 = WNOBlock(self.width)
         self.dec_block1 = WNOBlock(self.width)
         
@@ -152,7 +158,10 @@ class FNO2D(nn.Module):
         future_cond = self.future_proj(x_dec)
         h = h + future_cond  # additive conditioning
         
-        # --- DECODE: predict evolution under future conditions ---
+        # --- DECODE: explicit physical injection of starting state ---
+        # The decoder now has direct access to the exact T=0 pollution field it needs to evolve
+        h = self.dec_input(torch.cat([h, last_pm25], dim=1))
+        
         h = self.dec_block0(h)
         h = self.dec_block1(h)
         
