@@ -922,7 +922,14 @@ import json
 # REQUIRED KAGGLE TPU ENV VARIABLES
 # Must be set before importing torch or torch_xla
 # ==========================================
+# 1. Force PJRT to use the TPU
 os.environ['PJRT_DEVICE'] = 'TPU'
+
+# 2. Force XLA to recognize this is a SINGLE local machine, not a multi-node cluster
+os.environ["XRT_TPU_CONFIG"] = "localservice;0;localhost:51011"
+os.environ["TPU_PROCESS_ADDRESSES"] = "local"
+os.environ["TPU_NUM_DEVICES"] = "8"
+
 os.environ['XLA_USE_BF16'] = '1'
 
 import torch
