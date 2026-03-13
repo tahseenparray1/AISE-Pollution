@@ -372,5 +372,6 @@ def train_fn(index):
 # ENTRY POINT: Spawn across all 8 TPU cores
 # ==========================================
 if __name__ == '__main__':
-    # nprocs=8 for TPU v5e-8 (all 8 cores)
-    xmp.spawn(train_fn, args=(), nprocs=8)
+    # nprocs=None lets PJRT auto-detect all available TPU cores
+    # Set TPU_NUM_DEVICES env var to limit cores if needed
+    xmp.spawn(train_fn, args=(), nprocs=None)
