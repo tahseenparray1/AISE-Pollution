@@ -51,7 +51,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         self.emi_variables = cfg_train.features.emission_variables
         
         self.stats = stats_dict
-        self.topo_proxy = topo_proxy  # Single global (140, 124) map, same as training
+        self.topo_proxy = topo_proxy
 
         # Load raw files lazily
         self.arrs = {}
@@ -88,7 +88,6 @@ class TestDataLoader(torch.utils.data.Dataset):
             seq_raw[feat] = np.log1p(seq_raw[feat])
 
         # 4. Normalize and Categorize Features
-        pm25_hist = None
         temporal_feats = []
         static_feats = []
         
@@ -107,12 +106,9 @@ class TestDataLoader(torch.utils.data.Dataset):
         pm25_hist = (seq_raw['cpm25'] - self.stats['cpm25']['median']) / self.stats['cpm25']['iqr']
         pm25_hist = torch.from_numpy(pm25_hist).permute(1, 2, 0) # (140, 124, 10)
 
-        # 5. Build Tensors (Matching train.py encoder-decoder layout)
-        # === ENCODER: Historical temporal (10 features × 10 hours = 100 channels) ===
-        # temporal_feats are (C, T, H, W) where C=10 features, T=26 hours
+        # 5. Build Tensors (Matching train.py exactly)
         temporal_stack = np.stack(temporal_feats, axis=0)
-        hist_temporal = temporal_stack[:, :self.time_in, :, :]
-        hist_tensor = torch.from_numpy(np.ascontiguousarray(hist_temporal)).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
+        temporal_tensor = torch.from_numpy(temporal_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
         # Static: Use first frame only (matches train.py)
         static_stack = np.stack(static_feats, axis=0)
@@ -121,18 +117,8 @@ class TestDataLoader(torch.utils.data.Dataset):
         # Topo — single global map, identical for all samples
         topo_tensor = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
         
-        # === DECODER: Future temporal (16 hours × 11 features = 176 channels) ===
-        future_temporal = temporal_stack[:, self.time_in:, :, :]
-        future_tensor = torch.from_numpy(np.ascontiguousarray(future_temporal)).permute(2, 3, 1, 0) # (H, W, 16, 10)
-        
-        hour_idx = torch.arange(1, 17, dtype=torch.float32).view(1, 1, -1, 1) / 16.0
-        hour_encoding = hour_idx.expand(self.S1, self.S2, 16, 1)
-        
-        future_cond = torch.cat([future_tensor, hour_encoding], dim=-1) # (H, W, 16, 11)
-        future_final = future_cond.reshape(self.S1, self.S2, -1) # (H, W, 176)
-        
-        # Layout: [encoder_inputs (118) | decoder_inputs (176)] = 294 total
-        x = torch.cat((pm25_hist, hist_tensor, static_tensor, topo_tensor, future_final), dim=-1)
+        # Combine (10 + 260 + 7 + 1 = 278 Channels)
+        x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
 
         return x
 
@@ -143,18 +129,15 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # 3. MODEL INITIALIZATION
 # ==========================================
 pm_channels = cfg_train.data.time_input
-hist_weather_channels = 10 * cfg_train.data.time_input
+temporal_channels = 10 * cfg_train.data.total_time 
 static_channels = 7 
 topo_channels = 1
-future_weather_channels = 11 * cfg_train.data.time_out
 
-enc_channels = pm_channels + hist_weather_channels + static_channels + topo_channels  # 118
-dec_channels = future_weather_channels                                                 # 176
+in_channels = pm_channels + temporal_channels + static_channels + topo_channels
 
-print(f"Building Encoder-Decoder Model: enc={enc_channels}, dec={dec_channels}")
+print(f"Building Model with {in_channels} input channels...")
 model = FNO2D(
-    enc_channels=enc_channels,
-    dec_channels=dec_channels,
+    in_channels=in_channels,
     time_out=cfg_train.data.time_out,
     width=cfg_train.model.width,
     modes=cfg_train.model.modes,

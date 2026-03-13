@@ -40,13 +40,6 @@ pm_iqr_tensor = torch.tensor(stats['cpm25']['iqr'], dtype=torch.float32).to(devi
 def to_physical(x_norm):
     return (x_norm * pm_iqr_tensor) + pm_median_tensor
 
-def spatial_gradient_loss(pred_phys, target_phys):
-    dx_p = pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]
-    dx_t = target_phys[:, 1:, :, :] - target_phys[:, :-1, :, :]
-    dy_p = pred_phys[:, :, 1:, :] - pred_phys[:, :, :-1, :]
-    dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
-    return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
-
 # ==========================================
 # 3. DATA LOADER
 # ==========================================
@@ -60,27 +53,21 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         self.valid_starts = np.load(os.path.join(base_path, f"{split}_indices.npy"))
         
         self.time_in = cfg.data.time_input
-        self.time_out = cfg.data.time_out
         self.total_time = cfg.data.total_time
         self.S1, self.S2 = cfg.data.S1, cfg.data.S2
         
         # Build index mapping dynamically from feature order in prepare_dataset.yaml
-        # Feature order: met_variables_raw + emission_variables_raw + derived_features + [topo]
         all_features = (cfg.features.met_variables 
                        + cfg.features.emission_variables 
                        + cfg.features.derived_variables)
         
-        # Target variable index (robust against YAML reordering)
         assert 'cpm25' in all_features, "Target variable 'cpm25' must be in met_variables!"
         self.target_idx = all_features.index('cpm25')
         
-        # Temporal weather feature indices (met vars except cpm25, plus derived vars)
         self.temporal_idx = [i for i, f in enumerate(all_features) 
                            if f != 'cpm25' and f not in cfg.features.emission_variables]
-        # Static emission feature indices
         self.static_idx = [i for i, f in enumerate(all_features) 
                           if f in cfg.features.emission_variables]
-        # Topography is the last channel appended in prepare_dataset.py
         self.topo_idx = len(all_features)
 
     def __len__(self): 
@@ -90,13 +77,12 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         start = self.valid_starts[idx]
         window = self.data[start : start + self.total_time] 
         
-        # === ENCODER INPUTS (historical context) ===
         # 1. PM2.5 Historical Context (10 channels)
         pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
         
-        # 2. Historical Weather (first 10h × 10 features = 100 channels)
-        hist_weather = window[:self.time_in, ..., self.temporal_idx]
-        hist_weather = hist_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
+        # 2. Dynamic Temporal Weather (10 features * 26 hours = 260 channels)
+        temporal_weather = window[:, ..., self.temporal_idx]
+        temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
         
         # 3. Static Emissions (first frame — they are identical across all timesteps)
         static_emissions = window[0, ..., self.static_idx]
@@ -104,18 +90,8 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # 4. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        # === DECODER INPUTS (future conditions) ===
-        # 5. Future Weather (16h × 11 features = 176 channels)
-        future_weather = window[self.time_in:, ..., self.temporal_idx] # (16, H, W, 10)
-        
-        hour_idx = torch.arange(1, self.time_out + 1, dtype=torch.float32).view(-1, 1, 1, 1) / self.time_out
-        hour_encoding = hour_idx.expand(self.time_out, self.S1, self.S2, 1)
-        
-        future_cond = torch.cat([future_weather, hour_encoding], dim=-1)
-        future_tensor = future_cond.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
-        
-        # Layout: [encoder_inputs (118) | decoder_inputs (176)] = 294 total
-        x = torch.cat((pm_hist, hist_weather, static_emissions, topo, future_tensor), dim=-1)
+        # Combine everything (10 + 260 + 7 + 1 = 278 Channels)
+        x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
         
         # Target
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
@@ -130,19 +106,16 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # ==========================================
 # 4. MODEL & OPTIMIZER
 # ==========================================
-pm_channels = cfg.data.time_input                           # 10
-hist_weather_channels = 10 * cfg.data.time_input            # 100 (10 features × 10 hours)
-static_channels = 7                                         # 7 emission proxy maps
+pm_channels = cfg.data.time_input
+temporal_channels = 10 * cfg.data.total_time # 10 dynamic features * 26 hours
+static_channels = 7 # 7 emission proxy maps
 topo_channels = 1
-future_weather_channels = 11 * cfg.data.time_out            # 176 (11 features × 16 hours)
 
-enc_channels = pm_channels + hist_weather_channels + static_channels + topo_channels  # 118
-dec_channels = future_weather_channels                                                 # 176
-print(f"Building Encoder-Decoder Model: enc={enc_channels}, dec={dec_channels}, total={enc_channels + dec_channels}")
+in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+print(f"Building Model with {in_channels} input channels...")
 
 model = FNO2D(
-    enc_channels=enc_channels,
-    dec_channels=dec_channels,
+    in_channels=in_channels, 
     time_out=cfg.data.time_out, 
     width=cfg.model.width, 
     modes=cfg.model.modes,
@@ -174,23 +147,19 @@ for ep in range(MAX_EPOCHS):
     for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
         x, y = x.to(device), y.to(device)
         
-        # ONLY add noise to ENCODER inputs (historical data).
-        # Decoder inputs (future weather + temporal encoding) are PERFECT at test time.
-        enc_ch = enc_channels  # 118
-        noise = torch.randn(x.shape[0], x.shape[1], x.shape[2], enc_ch, device=x.device) * 0.01
-        noise[..., -1] = 0.0  # protect topo (last encoder channel)
-        x = torch.cat([x[..., :enc_ch] + noise, x[..., enc_ch:]], dim=-1)
+        # Add noise, protecting topography (last channel)
+        noise = torch.randn_like(x) * 0.01
+        noise[..., -1] = 0.0
+        x = x + noise
         
         optimizer.zero_grad(set_to_none=True)
         
         with torch.amp.autocast("cuda"):
-            # Single Forward Pass (Direct Multi-Step)
             out = model(x)
             
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            # --- LOSS FORMULATION ---
             # Pure MSE in physical space (directly matches Kaggle RMSE metric)
             total_loss = F.mse_loss(pred_phys, targ_phys)
 
@@ -200,15 +169,15 @@ for ep in range(MAX_EPOCHS):
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             num_batches += 1
             
-            if MAX_BATCHES and num_batches >= MAX_BATCHES:
-                break
-            
         scaler.scale(total_loss).backward()
         
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(optimizer)
         scaler.update()
+        
+        if MAX_BATCHES and num_batches >= MAX_BATCHES:
+            break
 
     # SWA SCHEDULER STEP
     if ep >= swa_start:
@@ -218,7 +187,6 @@ for ep in range(MAX_EPOCHS):
         scheduler.step()
 
     # VALIDATION
-    # Use the SWA model if we have crossed the threshold
     eval_model = swa_model if ep >= swa_start else model
     eval_model.eval()
 
@@ -233,7 +201,6 @@ for ep in range(MAX_EPOCHS):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            # Apply ReLU to mimic the physical world constraint for our final score
             pred_phys_clipped = F.relu(pred_phys)
             
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
@@ -247,7 +214,6 @@ for ep in range(MAX_EPOCHS):
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
         if cfg.training.save_checkpoint:
-            # Save the currently evaluating model's dict (which will be SWA if active)
             torch.save({'model_state_dict': eval_model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
         print(f"  -> New Best Val RMSE: {best_val_rmse:.4f}")
 
