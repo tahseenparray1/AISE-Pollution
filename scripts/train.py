@@ -193,7 +193,7 @@ for ep in range(cfg.training.epochs):
             print(f"{'='*60}\n")
         
         # Apply 3% noise to continuous features (infinite data multiplier)
-        noise = torch.randn_like(x) * 0.03
+        noise = torch.randn_like(x) * 0.05
         noise[..., -1] = 0.0  # Zero out noise for topography (last channel)
         x = x + noise
         
@@ -216,7 +216,7 @@ for ep in range(cfg.training.epochs):
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
         # Blended Total Loss: temporal weight lowered to let model capture sharp spikes
-        total_loss = huber_loss + (0.2 * temporal_loss) + (0.5 * loss_grad)
+        total_loss = huber_loss + (0.3 * temporal_loss) + (0.5 * loss_grad)
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())

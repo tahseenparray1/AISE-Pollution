@@ -96,7 +96,7 @@ class FNO2D(nn.Module):
             nn.Conv2d(in_channels + 2, width, kernel_size=1),
             nn.GroupNorm(4, width),
             nn.GELU(),
-            nn.Dropout2d(p=0.1)  # 10% Channel Dropout (drops entire feature maps)
+            nn.Dropout2d(p=0.15)  # 10% Channel Dropout (drops entire feature maps)
         )
         
         # Stack WNO blocks instead of FNO blocks
