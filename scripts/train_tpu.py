@@ -380,5 +380,5 @@ def train_fn(index):
 # ENTRY POINT: Spawn across all 8 TPU cores
 # ==========================================
 if __name__ == '__main__':
-    # nprocs=8 uses all 8 TPU cores. start_method='fork' is required on Kaggle TPUs.
-    xmp.spawn(train_fn, args=(), nprocs=8, start_method='fork')
+    # Change nprocs from 8 to None
+    xmp.spawn(train_fn, args=(), nprocs=None, start_method='fork')
