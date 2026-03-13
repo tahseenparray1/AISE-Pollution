@@ -21,6 +21,11 @@ torch.manual_seed(0)
 torch.backends.cudnn.benchmark = True
 np.random.seed(0)
 
+# === FAST DEV RUN: Set to True for quick testing, False for full training ===
+FAST_DEV_RUN = False
+MAX_BATCHES = 10 if FAST_DEV_RUN else None  # None = use all batches
+MAX_EPOCHS = 10 if FAST_DEV_RUN else cfg.training.epochs
+
 S1, S2 = cfg.data.S1, cfg.data.S2
 
 # ==========================================
@@ -160,19 +165,21 @@ scaler = torch.amp.GradScaler("cuda")
 best_val_rmse = float('inf')
 log = []
 
-for ep in range(cfg.training.epochs):
+for ep in range(MAX_EPOCHS):
     model.train()
     t_start = time.time()
     train_mse_acc = 0.0
+    num_batches = 0
 
     for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
         x, y = x.to(device), y.to(device)
         
-        # Apply noise only to continuous features, protecting:
-        # - Topography (last channel): static elevation proxy from PSFC
-        noise = torch.randn_like(x) * 0.01
-        noise[..., -1] = 0.0  # Zero out noise for topography (last channel)
-        x = x + noise
+        # ONLY add noise to ENCODER inputs (historical data).
+        # Decoder inputs (future weather + temporal encoding) are PERFECT at test time.
+        enc_ch = enc_channels  # 118
+        noise = torch.randn(x.shape[0], x.shape[1], x.shape[2], enc_ch, device=x.device) * 0.01
+        noise[..., -1] = 0.0  # protect topo (last encoder channel)
+        x = torch.cat([x[..., :enc_ch] + noise, x[..., enc_ch:]], dim=-1)
         
         optimizer.zero_grad(set_to_none=True)
         
@@ -184,19 +191,17 @@ for ep in range(cfg.training.epochs):
             targ_phys = to_physical(y)
             
             # --- LOSS FORMULATION ---
-            # 1. MSE in physical space (directly matches Kaggle RMSE metric)
-            mse_loss = F.mse_loss(pred_phys, targ_phys)
-            
-            # 2. Spatial Gradient Loss (Keeps plume edges sharp)
-            loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-            
-            # 3. Blended Total Loss
-            total_loss = mse_loss + 0.1 * loss_grad
+            # Pure MSE in physical space (directly matches Kaggle RMSE metric)
+            total_loss = F.mse_loss(pred_phys, targ_phys)
 
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
+            num_batches += 1
+            
+            if MAX_BATCHES and num_batches >= MAX_BATCHES:
+                break
             
         scaler.scale(total_loss).backward()
         
@@ -233,7 +238,7 @@ for ep in range(cfg.training.epochs):
             
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
 
-    train_rmse = np.sqrt(train_mse_acc / len(train_loader))
+    train_rmse = np.sqrt(train_mse_acc / num_batches)
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
     
     duration = time.time() - t_start
