@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
-from src.utils.adam import Adam
+from torch.optim import Adam
 from src.utils.config import load_config
 from models.baseline_model import FNO2D
 from torch.optim.swa_utils import AveragedModel, SWALR 
@@ -18,6 +18,7 @@ cfg = load_config("configs/train.yaml")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(0)
+torch.backends.cudnn.benchmark = True
 np.random.seed(0)
 
 S1, S2 = cfg.data.S1, cfg.data.S2
@@ -81,7 +82,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         start = self.valid_starts[idx]
-        window = self.data[start : start + self.total_time].clone() 
+        window = self.data[start : start + self.total_time] 
         
         # 1. PM2.5 Historical Context (10 channels)
         pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
@@ -91,7 +92,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
         
         # 3. Static Emissions (Mean across the 26 hours to collapse to 7 spatial channels)
-        static_emissions = window[:, ..., self.static_idx].mean(dim=0)
+        static_emissions = window[0, ..., self.static_idx]
         
         # 4. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
@@ -139,6 +140,8 @@ swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
 # ==========================================
 # 5. TRAINING LOOP
 # ==========================================
+scaler = torch.cuda.amp.GradScaler()
+
 best_val_rmse = float('inf')
 log = []
 
@@ -159,30 +162,34 @@ for ep in range(cfg.training.epochs):
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Single Forward Pass (Direct Multi-Step)
-        out = model(x)
-        
-        pred_phys = to_physical(out)
-        targ_phys = to_physical(y)
-        
-        # --- NEW LOSS FORMULATION ---
-        # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
-        
-        # 2. Spatial Gradient Loss (Keeps plume edges sharp)
-        loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-        
-        # 3. Blended Total Loss
-        total_loss = huber_loss + 0.1 * loss_grad
+        with torch.cuda.amp.autocast():
+            # Single Forward Pass (Direct Multi-Step)
+            out = model(x)
+            
+            pred_phys = to_physical(out)
+            targ_phys = to_physical(y)
+            
+            # --- NEW LOSS FORMULATION ---
+            # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
+            huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+            
+            # 2. Spatial Gradient Loss (Keeps plume edges sharp)
+            loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+            
+            # 3. Blended Total Loss
+            total_loss = huber_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
-        total_loss.backward()
+            
+        scaler.scale(total_loss).backward()
         
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
     # --- NEW: SWA SCHEDULER STEP ---
     if ep >= swa_start:
