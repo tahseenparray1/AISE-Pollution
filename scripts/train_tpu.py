@@ -17,6 +17,14 @@ Key TPU optimizations:
 import os
 import time
 import json
+
+# ==========================================
+# REQUIRED KAGGLE TPU ENV VARIABLES
+# Must be set before importing torch or torch_xla
+# ==========================================
+os.environ['PJRT_DEVICE'] = 'TPU'
+os.environ['XLA_USE_BF16'] = '1'
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -372,6 +380,5 @@ def train_fn(index):
 # ENTRY POINT: Spawn across all 8 TPU cores
 # ==========================================
 if __name__ == '__main__':
-    # nprocs=None lets PJRT auto-detect all available TPU cores
-    # Set TPU_NUM_DEVICES env var to limit cores if needed
-    xmp.spawn(train_fn, args=(), nprocs=None)
+    # nprocs=8 uses all 8 TPU cores. start_method='fork' is required on Kaggle TPUs.
+    xmp.spawn(train_fn, args=(), nprocs=8, start_method='fork')
