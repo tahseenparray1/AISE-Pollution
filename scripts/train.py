@@ -140,7 +140,7 @@ swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
 # ==========================================
 # 5. TRAINING LOOP
 # ==========================================
-scaler = torch.cuda.amp.GradScaler()
+scaler = torch.amp.GradScaler("cuda")
 
 best_val_rmse = float('inf')
 log = []
@@ -162,7 +162,7 @@ for ep in range(cfg.training.epochs):
         
         optimizer.zero_grad(set_to_none=True)
         
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast("cuda"):
             # Single Forward Pass (Direct Multi-Step)
             out = model(x)
             
