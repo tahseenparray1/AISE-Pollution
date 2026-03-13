@@ -1,5 +1,5 @@
 ================================================================================
-FILE: configs/infer.yaml
+FILE: configs\infer.yaml
 ================================================================================
 
 experiment:
@@ -34,7 +34,7 @@ model:
 
 
 ================================================================================
-FILE: configs/prepare_dataset.yaml
+FILE: configs\prepare_dataset.yaml
 ================================================================================
 
 paths:
@@ -59,7 +59,7 @@ features:
 
 
 ================================================================================
-FILE: configs/train.yaml
+FILE: configs\train.yaml
 ================================================================================
 
 experiment:
@@ -103,13 +103,13 @@ training:
 
 
 ================================================================================
-FILE: models/__init__.py
+FILE: models\__init__.py
 ================================================================================
 
 
 
 ================================================================================
-FILE: models/baseline_model.py
+FILE: models\baseline_model.py
 ================================================================================
 
 import torch
@@ -121,8 +121,8 @@ class HaarWavelet2D(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
         # Haar wavelet filters: Low-Low, Low-High, High-Low, High-High
-        h0 = [1/2, 1/2]
-        h1 = [-1/2, 1/2]
+        h0 = [1 / 1.41421356, 1 / 1.41421356]
+        h1 = [-1 / 1.41421356, 1 / 1.41421356]
         
         # Create 2D filters via outer product
         ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
@@ -142,8 +142,8 @@ class InverseHaarWavelet2D(nn.Module):
     """ Native PyTorch 2D Inverse Haar Wavelet Transform """
     def __init__(self, in_channels):
         super().__init__()
-        h0 = [1.0, 1.0]
-        h1 = [-1.0, 1.0]
+        h0 = [1 / 1.41421356, 1 / 1.41421356]
+        h1 = [-1 / 1.41421356, 1 / 1.41421356]
         
         ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
         lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
@@ -171,7 +171,12 @@ class WNOBlock(nn.Module):
         
         # FIX #4: Depthwise conv with large kernel to expand receptive field
         # Enables modeling long-range wind advection across the 140x124 spatial grid
-        self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=2, groups=width)
+        self.spatial_mixer = nn.Sequential(
+            # Spatial information (Depthwise)
+            nn.Conv2d(width, width, kernel_size=5, padding=2, groups=width),
+            # Cross-channel information (Pointwise)
+            nn.Conv2d(width, width, kernel_size=1)
+        )
         
         self.pointwise = nn.Conv2d(width, width, 1)
         self.norm = nn.GroupNorm(4, width)
@@ -179,13 +184,22 @@ class WNOBlock(nn.Module):
     def forward(self, x):
         x_norm = self.norm(x)
         
-        # 1. Decompose to Wavelet domain
+        # 1. Decompose to Wavelet domain (Channels are interleaved: c1_ll, c1_lh, c2_ll...)
         x_w = self.dwt(x_norm)
         
-        # 2. Mix frequencies
+        # 2. Reshape to group by sub-band (LLs together, LHs together, etc.)
+        b, c_times_4, h, w = x_w.shape
+        c = c_times_4 // 4
+        # Reshape: (B, C, 4, H, W) -> Permute: (B, 4, C, H, W) -> Flatten: (B, 4*C, H, W)
+        x_w = x_w.view(b, c, 4, h, w).permute(0, 2, 1, h, w).reshape(b, c_times_4, h, w)
+        
+        # 3. NOW mix frequencies (Groups=4 works perfectly here!)
         x_w = self.spectral_mixer(x_w)
         
-        # 3. Reconstruct back to Spatial domain
+        # 4. Reverse the permutation for IDWT
+        x_w = x_w.view(b, 4, c, h, w).permute(0, 2, 1, h, w).reshape(b, c_times_4, h, w)
+        
+        # 5. Reconstruct back to Spatial domain
         out_w = self.idwt(x_w)
         
         # 4. Apply large-kernel spatial mixing for extended receptive field
@@ -210,7 +224,7 @@ class FNO2D(nn.Module):
             nn.Conv2d(in_channels + 2, width, kernel_size=1),
             nn.GroupNorm(4, width),
             nn.GELU(),
-            nn.Dropout(p=0.05)
+            nn.Dropout2d(p=0.01)
         )
         
         # Stack WNO blocks instead of FNO blocks
@@ -259,7 +273,7 @@ class FNO2D(nn.Module):
         return out.permute(0, 2, 3, 1)
 
 ================================================================================
-FILE: scripts/infer.py
+FILE: scripts\infer.py
 ================================================================================
 
 import os
@@ -294,7 +308,8 @@ pm_median = stats['cpm25']['median'].reshape(1, cfg_infer.data.S1, cfg_infer.dat
 pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 1)
 
 def denorm(x):
-    return (x * pm_iqr) + pm_median
+    x_log = (x * pm_iqr) + pm_median
+    return np.expm1(x_log)
 
 # Compute Static Topography Proxy using training stats
 # Note: Since psfc isn't in train.yaml features anymore, we load it directly from test_in just for this map
@@ -349,7 +364,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         seq_raw['rain_mask'] = rm
         
         # 3. Apply Log Transforms
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh']
+        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh', 'cpm25']
         for feat in skewed_features:
             seq_raw[feat] = np.log1p(seq_raw[feat])
 
@@ -451,7 +466,7 @@ print(f"Success! Predictions saved to: {out_file}")
 print(f"Final array shape: {prediction.shape}")
 
 ================================================================================
-FILE: scripts/prepare_dataset.py
+FILE: scripts\prepare_dataset.py
 ================================================================================
 
 import os
@@ -487,7 +502,7 @@ def load_raw_or_derived(feat, month):
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         
         # --- THE FIX: pblh added to log transform to compress diurnal variance ---
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh'] 
+        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh', 'cpm25'] 
         if feat in skewed_features:
             arr = np.log1p(arr)
             
@@ -573,7 +588,7 @@ np.save(os.path.join(cfg.paths.val_savepath, "val_indices.npy"), val_indices)
 print(f"Success! Train shape: {final_train.shape} | Val shape: {final_val.shape}")
 
 ================================================================================
-FILE: scripts/train.py
+FILE: scripts\train.py
 ================================================================================
 
 import os
@@ -587,6 +602,7 @@ from tqdm import tqdm
 from src.utils.adam import Adam
 from src.utils.config import load_config
 from models.baseline_model import FNO2D
+import wandb
 from torch.optim.swa_utils import AveragedModel, SWALR 
 
 # ==========================================
@@ -597,6 +613,8 @@ cfg = load_config("configs/train.yaml")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(0)
 np.random.seed(0)
+
+wandb.init(project="AISE-Pollution", config=vars(cfg) if hasattr(cfg, '__dict__') else None)
 
 S1, S2 = cfg.data.S1, cfg.data.S2
 
@@ -610,7 +628,8 @@ pm_median_tensor = torch.tensor(stats['cpm25']['median'], dtype=torch.float32).t
 pm_iqr_tensor = torch.tensor(stats['cpm25']['iqr'], dtype=torch.float32).to(device).view(1, S1, S2, 1)
 
 def to_physical(x_norm):
-    return (x_norm * pm_iqr_tensor) + pm_median_tensor
+    x_log = (x_norm * pm_iqr_tensor) + pm_median_tensor
+    return torch.expm1(x_log)
 
 def spatial_gradient_loss(pred_phys, target_phys):
     dx_p = pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]
@@ -725,8 +744,20 @@ for ep in range(cfg.training.epochs):
     t_start = time.time()
     train_mse_acc = 0.0
 
-    for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
+    for batch_idx, (x, y) in enumerate(tqdm(train_loader, desc=f"Epoch {ep}")):
         x, y = x.to(device), y.to(device)
+        
+        # --- SANITY CHECKS (First Batch Only) ---
+        if ep == 0 and batch_idx == 0:
+            print("--- DATA & TENSOR SANITY CHECKS ---")
+            print(f"Input shape: {x.shape} | Target shape: {y.shape}")
+            print(f"NaNs in x: {torch.isnan(x).any().item()} | Infs in x: {torch.isinf(x).any().item()}")
+            pm_max = x[..., :cfg.data.time_input].max().item()
+            met_max = x[..., cfg.data.time_input:cfg.data.time_input+(10*cfg.data.total_time)].max().item()
+            print(f"Feature-wise Max - PM2.5 Channels: {pm_max:.4f} | Meteorological Channels: {met_max:.4f}")
+            noise_sanity = torch.randn_like(x) * 0.01
+            print(f"Mean Abs Noise: {torch.abs(noise_sanity).mean().item():.6f} | Mean Abs Input: {torch.abs(x).mean().item():.4f}")
+            print("-----------------------------------")
         
         # FIX #2: Apply noise only to continuous features, protecting:
         # - Topography (last channel): static elevation proxy from PSFC
@@ -745,22 +776,36 @@ for ep in range(cfg.training.epochs):
         
         # --- NEW LOSS FORMULATION ---
         # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+        mse_loss = F.mse_loss(pred_phys, targ_phys)
         
         # 2. Spatial Gradient Loss (Keeps plume edges sharp)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
         # 3. Blended Total Loss
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = mse_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
+        
         total_loss.backward()
         
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # 1. Log Gradient Health
+        total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        
         optimizer.step()
+        
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # Log Loss Components and Optimization Health
+        wandb.log({
+            "train/loss_total": total_loss.item(),
+            "train/loss_mse": mse_loss.item(),
+            "train/loss_grad": loss_grad.item(),
+            "train/grad_norm": total_norm.item(),
+            "train/learning_rate": current_lr
+        })
 
     # --- NEW: SWA SCHEDULER STEP ---
     if ep >= swa_start:
@@ -786,6 +831,22 @@ for ep in range(cfg.training.epochs):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
+            # 2. Log Physical Validity (on the un-clipped physical predictions)
+            negative_preds_pct = (pred_phys < 0).float().mean().item()
+            batch_actual_max = targ_phys.max().item()
+            batch_pred_max = pred_phys.max().item()
+            
+            last_pm25 = x[..., cfg.data.time_input-1].unsqueeze(-1)
+            last_pm25_phys = to_physical(last_pm25)
+            mean_delta = torch.abs(pred_phys - last_pm25_phys).mean().item()
+            
+            wandb.log({
+                "val/negative_preds_pct": negative_preds_pct,
+                "val/batch_actual_max": batch_actual_max,
+                "val/batch_pred_max": batch_pred_max,
+                "val/mean_delta": mean_delta
+            })
+            
             # Apply ReLU to mimic the physical world constraint for our final score
             pred_phys_clipped = F.relu(pred_phys)
             
@@ -793,6 +854,8 @@ for ep in range(cfg.training.epochs):
 
     train_rmse = np.sqrt(train_mse_acc / len(train_loader))
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
+    
+    wandb.log({"train/rmse": train_rmse, "val/rmse": val_rmse, "epoch": ep})
     
     duration = time.time() - t_start
     print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
@@ -808,13 +871,13 @@ for ep in range(cfg.training.epochs):
     with open(cfg.paths.save_dir, 'w') as f: json.dump(log, f)
 
 ================================================================================
-FILE: src/utils/__init__.py
+FILE: src/utils\__init__.py
 ================================================================================
 
 
 
 ================================================================================
-FILE: src/utils/adam.py
+FILE: src/utils\adam.py
 ================================================================================
 
 import math
@@ -983,7 +1046,7 @@ class Adam(Optimizer):
 
 
 ================================================================================
-FILE: src/utils/config.py
+FILE: src/utils\config.py
 ================================================================================
 
 import yaml
@@ -1004,7 +1067,7 @@ def load_config(path):
 
 
 ================================================================================
-FILE: src/utils/metrics.py
+FILE: src/utils\metrics.py
 ================================================================================
 
 import numpy as np
@@ -1030,7 +1093,7 @@ def smape(actual, pred, dim=(1,2)):
 
 
 ================================================================================
-FILE: src/utils/utilities3.py
+FILE: src/utils\utilities3.py
 ================================================================================
 
 import torch

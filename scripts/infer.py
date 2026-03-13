@@ -30,7 +30,8 @@ pm_median = stats['cpm25']['median'].reshape(1, cfg_infer.data.S1, cfg_infer.dat
 pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 1)
 
 def denorm(x):
-    return (x * pm_iqr) + pm_median
+    x_log = (x * pm_iqr) + pm_median
+    return np.expm1(x_log)
 
 # Compute Static Topography Proxy using training stats
 # Note: Since psfc isn't in train.yaml features anymore, we load it directly from test_in just for this map
@@ -85,7 +86,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         seq_raw['rain_mask'] = rm
         
         # 3. Apply Log Transforms
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh']
+        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh', 'cpm25']
         for feat in skewed_features:
             seq_raw[feat] = np.log1p(seq_raw[feat])
 

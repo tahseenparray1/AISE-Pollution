@@ -9,6 +9,7 @@ from tqdm import tqdm
 from src.utils.adam import Adam
 from src.utils.config import load_config
 from models.baseline_model import FNO2D
+import wandb
 from torch.optim.swa_utils import AveragedModel, SWALR 
 
 # ==========================================
@@ -19,6 +20,8 @@ cfg = load_config("configs/train.yaml")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(0)
 np.random.seed(0)
+
+wandb.init(project="AISE-Pollution", config=vars(cfg) if hasattr(cfg, '__dict__') else None)
 
 S1, S2 = cfg.data.S1, cfg.data.S2
 
@@ -32,7 +35,8 @@ pm_median_tensor = torch.tensor(stats['cpm25']['median'], dtype=torch.float32).t
 pm_iqr_tensor = torch.tensor(stats['cpm25']['iqr'], dtype=torch.float32).to(device).view(1, S1, S2, 1)
 
 def to_physical(x_norm):
-    return (x_norm * pm_iqr_tensor) + pm_median_tensor
+    x_log = (x_norm * pm_iqr_tensor) + pm_median_tensor
+    return torch.expm1(x_log)
 
 def spatial_gradient_loss(pred_phys, target_phys):
     dx_p = pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]
@@ -147,8 +151,20 @@ for ep in range(cfg.training.epochs):
     t_start = time.time()
     train_mse_acc = 0.0
 
-    for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
+    for batch_idx, (x, y) in enumerate(tqdm(train_loader, desc=f"Epoch {ep}")):
         x, y = x.to(device), y.to(device)
+        
+        # --- SANITY CHECKS (First Batch Only) ---
+        if ep == 0 and batch_idx == 0:
+            print("--- DATA & TENSOR SANITY CHECKS ---")
+            print(f"Input shape: {x.shape} | Target shape: {y.shape}")
+            print(f"NaNs in x: {torch.isnan(x).any().item()} | Infs in x: {torch.isinf(x).any().item()}")
+            pm_max = x[..., :cfg.data.time_input].max().item()
+            met_max = x[..., cfg.data.time_input:cfg.data.time_input+(10*cfg.data.total_time)].max().item()
+            print(f"Feature-wise Max - PM2.5 Channels: {pm_max:.4f} | Meteorological Channels: {met_max:.4f}")
+            noise_sanity = torch.randn_like(x) * 0.01
+            print(f"Mean Abs Noise: {torch.abs(noise_sanity).mean().item():.6f} | Mean Abs Input: {torch.abs(x).mean().item():.4f}")
+            print("-----------------------------------")
         
         # FIX #2: Apply noise only to continuous features, protecting:
         # - Topography (last channel): static elevation proxy from PSFC
@@ -167,22 +183,36 @@ for ep in range(cfg.training.epochs):
         
         # --- NEW LOSS FORMULATION ---
         # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+        mse_loss = F.mse_loss(pred_phys, targ_phys)
         
         # 2. Spatial Gradient Loss (Keeps plume edges sharp)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
         # 3. Blended Total Loss
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = mse_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
+        
         total_loss.backward()
         
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # 1. Log Gradient Health
+        total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        
         optimizer.step()
+        
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # Log Loss Components and Optimization Health
+        wandb.log({
+            "train/loss_total": total_loss.item(),
+            "train/loss_mse": mse_loss.item(),
+            "train/loss_grad": loss_grad.item(),
+            "train/grad_norm": total_norm.item(),
+            "train/learning_rate": current_lr
+        })
 
     # --- NEW: SWA SCHEDULER STEP ---
     if ep >= swa_start:
@@ -208,6 +238,22 @@ for ep in range(cfg.training.epochs):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
+            # 2. Log Physical Validity (on the un-clipped physical predictions)
+            negative_preds_pct = (pred_phys < 0).float().mean().item()
+            batch_actual_max = targ_phys.max().item()
+            batch_pred_max = pred_phys.max().item()
+            
+            last_pm25 = x[..., cfg.data.time_input-1].unsqueeze(-1)
+            last_pm25_phys = to_physical(last_pm25)
+            mean_delta = torch.abs(pred_phys - last_pm25_phys).mean().item()
+            
+            wandb.log({
+                "val/negative_preds_pct": negative_preds_pct,
+                "val/batch_actual_max": batch_actual_max,
+                "val/batch_pred_max": batch_pred_max,
+                "val/mean_delta": mean_delta
+            })
+            
             # Apply ReLU to mimic the physical world constraint for our final score
             pred_phys_clipped = F.relu(pred_phys)
             
@@ -215,6 +261,8 @@ for ep in range(cfg.training.epochs):
 
     train_rmse = np.sqrt(train_mse_acc / len(train_loader))
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
+    
+    wandb.log({"train/rmse": train_rmse, "val/rmse": val_rmse, "epoch": ep})
     
     duration = time.time() - t_start
     print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")

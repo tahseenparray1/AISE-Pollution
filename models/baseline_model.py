@@ -7,8 +7,8 @@ class HaarWavelet2D(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
         # Haar wavelet filters: Low-Low, Low-High, High-Low, High-High
-        h0 = [1/2, 1/2]
-        h1 = [-1/2, 1/2]
+        h0 = [1 / 1.41421356, 1 / 1.41421356]
+        h1 = [-1 / 1.41421356, 1 / 1.41421356]
         
         # Create 2D filters via outer product
         ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
@@ -28,8 +28,8 @@ class InverseHaarWavelet2D(nn.Module):
     """ Native PyTorch 2D Inverse Haar Wavelet Transform """
     def __init__(self, in_channels):
         super().__init__()
-        h0 = [1.0, 1.0]
-        h1 = [-1.0, 1.0]
+        h0 = [1 / 1.41421356, 1 / 1.41421356]
+        h1 = [-1 / 1.41421356, 1 / 1.41421356]
         
         ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
         lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
@@ -57,7 +57,12 @@ class WNOBlock(nn.Module):
         
         # FIX #4: Depthwise conv with large kernel to expand receptive field
         # Enables modeling long-range wind advection across the 140x124 spatial grid
-        self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=2, groups=width)
+        self.spatial_mixer = nn.Sequential(
+            # Spatial information (Depthwise)
+            nn.Conv2d(width, width, kernel_size=5, padding=2, groups=width),
+            # Cross-channel information (Pointwise)
+            nn.Conv2d(width, width, kernel_size=1)
+        )
         
         self.pointwise = nn.Conv2d(width, width, 1)
         self.norm = nn.GroupNorm(4, width)
@@ -65,13 +70,22 @@ class WNOBlock(nn.Module):
     def forward(self, x):
         x_norm = self.norm(x)
         
-        # 1. Decompose to Wavelet domain
+        # 1. Decompose to Wavelet domain (Channels are interleaved: c1_ll, c1_lh, c2_ll...)
         x_w = self.dwt(x_norm)
         
-        # 2. Mix frequencies
+        # 2. Reshape to group by sub-band (LLs together, LHs together, etc.)
+        b, c_times_4, h, w = x_w.shape
+        c = c_times_4 // 4
+        # Reshape: (B, C, 4, H, W) -> Permute: (B, 4, C, H, W) -> Flatten: (B, 4*C, H, W)
+        x_w = x_w.view(b, c, 4, h, w).permute(0, 2, 1, h, w).reshape(b, c_times_4, h, w)
+        
+        # 3. NOW mix frequencies (Groups=4 works perfectly here!)
         x_w = self.spectral_mixer(x_w)
         
-        # 3. Reconstruct back to Spatial domain
+        # 4. Reverse the permutation for IDWT
+        x_w = x_w.view(b, 4, c, h, w).permute(0, 2, 1, h, w).reshape(b, c_times_4, h, w)
+        
+        # 5. Reconstruct back to Spatial domain
         out_w = self.idwt(x_w)
         
         # 4. Apply large-kernel spatial mixing for extended receptive field
@@ -96,7 +110,7 @@ class FNO2D(nn.Module):
             nn.Conv2d(in_channels + 2, width, kernel_size=1),
             nn.GroupNorm(4, width),
             nn.GELU(),
-            nn.Dropout(p=0.05)
+            nn.Dropout2d(p=0.01)
         )
         
         # Stack WNO blocks instead of FNO blocks
