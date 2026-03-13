@@ -55,6 +55,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         self.valid_starts = np.load(os.path.join(base_path, f"{split}_indices.npy"))
         
         self.time_in = cfg.data.time_input
+        self.time_out = cfg.data.time_out
         self.total_time = cfg.data.total_time
         self.S1, self.S2 = cfg.data.S1, cfg.data.S2
         
