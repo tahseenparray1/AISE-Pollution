@@ -84,12 +84,13 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         start = self.valid_starts[idx]
         window = self.data[start : start + self.total_time] 
         
+        # === ENCODER INPUTS (historical context) ===
         # 1. PM2.5 Historical Context (10 channels)
         pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
         
-        # 2. Dynamic Temporal Weather (10 features * 26 hours = 260 channels)
-        temporal_weather = window[:, ..., self.temporal_idx]
-        temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
+        # 2. Historical Weather (first 10h × 10 features = 100 channels)
+        hist_weather = window[:self.time_in, ..., self.temporal_idx]
+        hist_weather = hist_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
         
         # 3. Static Emissions (first frame — they are identical across all timesteps)
         static_emissions = window[0, ..., self.static_idx]
@@ -97,10 +98,15 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # 4. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        # Combine everything (10 + 260 + 7 + 1 = 278 Channels)
-        x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
+        # === DECODER INPUTS (future conditions) ===
+        # 5. Future Weather (16h × 10 features = 160 channels)
+        future_weather = window[self.time_in:, ..., self.temporal_idx]
+        future_weather = future_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
         
-        # Target (uses same config-driven index as input)
+        # Layout: [encoder_inputs (118) | decoder_inputs (160)] = 278 total
+        x = torch.cat((pm_hist, hist_weather, static_emissions, topo, future_weather), dim=-1)
+        
+        # Target
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
         return x, y
 
@@ -113,16 +119,19 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # ==========================================
 # 4. MODEL & OPTIMIZER
 # ==========================================
-pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time # 10 dynamic features
-static_channels = 7 # 7 emission proxy maps
+pm_channels = cfg.data.time_input                           # 10
+hist_weather_channels = 10 * cfg.data.time_input            # 100 (10 features × 10 hours)
+static_channels = 7                                         # 7 emission proxy maps
 topo_channels = 1
+future_weather_channels = 10 * cfg.data.time_out            # 160 (10 features × 16 hours)
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
-print(f"Building Model with {in_channels} input channels...")
+enc_channels = pm_channels + hist_weather_channels + static_channels + topo_channels  # 118
+dec_channels = future_weather_channels                                                 # 160
+print(f"Building Encoder-Decoder Model: enc={enc_channels}, dec={dec_channels}, total={enc_channels + dec_channels}")
 
 model = FNO2D(
-    in_channels=in_channels, 
+    enc_channels=enc_channels,
+    dec_channels=dec_channels,
     time_out=cfg.data.time_out, 
     width=cfg.model.width, 
     modes=cfg.model.modes,

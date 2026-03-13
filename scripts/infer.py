@@ -107,20 +107,26 @@ class TestDataLoader(torch.utils.data.Dataset):
         pm25_hist = (seq_raw['cpm25'] - self.stats['cpm25']['median']) / self.stats['cpm25']['iqr']
         pm25_hist = torch.from_numpy(pm25_hist).permute(1, 2, 0) # (140, 124, 10)
 
-        # 5. Build Tensors (Matching train.py exactly)
-        # Temporal: (Channels, Time, H, W) -> (H, W, Time, Channels) -> (H, W, Time * Channels)
+        # 5. Build Tensors (Matching train.py encoder-decoder layout)
+        # === ENCODER: Historical temporal (10 features × 10 hours = 100 channels) ===
+        # temporal_feats are (C, T, H, W) where C=10 features, T=26 hours
         temporal_stack = np.stack(temporal_feats, axis=0)
-        temporal_tensor = torch.from_numpy(temporal_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
+        hist_temporal = temporal_stack[:, :self.time_in, :, :]
+        hist_tensor = torch.from_numpy(np.ascontiguousarray(hist_temporal)).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
-        # Static: Use first frame only (matches train.py — emissions are static within a window)
+        # Static: Use first frame only (matches train.py)
         static_stack = np.stack(static_feats, axis=0)
         static_tensor = torch.from_numpy(static_stack[:, 0, :, :]).permute(1, 2, 0)
         
         # Topo — single global map, identical for all samples
         topo_tensor = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
         
-        # Combine (10 + 260 + 7 + 1 = 278 Channels)
-        x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
+        # === DECODER: Future temporal (10 features × 16 hours = 160 channels) ===
+        future_temporal = temporal_stack[:, self.time_in:, :, :]
+        future_tensor = torch.from_numpy(np.ascontiguousarray(future_temporal)).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
+        
+        # Layout: [encoder_inputs (118) | decoder_inputs (160)] = 278 total
+        x = torch.cat((pm25_hist, hist_tensor, static_tensor, topo_tensor, future_tensor), dim=-1)
 
         return x
 
@@ -131,15 +137,18 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # 3. MODEL INITIALIZATION
 # ==========================================
 pm_channels = cfg_train.data.time_input
-temporal_channels = 10 * cfg_train.data.total_time 
+hist_weather_channels = 10 * cfg_train.data.time_input
 static_channels = 7 
 topo_channels = 1
+future_weather_channels = 10 * cfg_train.data.time_out
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+enc_channels = pm_channels + hist_weather_channels + static_channels + topo_channels  # 118
+dec_channels = future_weather_channels                                                 # 160
 
-print(f"Building WNO Model with optimized {in_channels} input channels...")
+print(f"Building Encoder-Decoder Model: enc={enc_channels}, dec={dec_channels}")
 model = FNO2D(
-    in_channels=in_channels,
+    enc_channels=enc_channels,
+    dec_channels=dec_channels,
     time_out=cfg_train.data.time_out,
     width=cfg_train.model.width,
     modes=cfg_train.model.modes,
