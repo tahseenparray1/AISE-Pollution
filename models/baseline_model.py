@@ -99,11 +99,8 @@ class FNO2D(nn.Module):
             nn.Dropout(p=0.05)
         )
         
-        # Stack WNO blocks instead of FNO blocks
-        self.block0 = WNOBlock(self.width)
-        self.block1 = WNOBlock(self.width)
-        self.block2 = WNOBlock(self.width)
-        self.block3 = WNOBlock(self.width)
+        # 6 WNO blocks (up from 4) for more capacity
+        self.blocks = nn.ModuleList([WNOBlock(self.width) for _ in range(6)])
         
         self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
         self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1) 
@@ -126,11 +123,15 @@ class FNO2D(nn.Module):
         
         x_feat = self.input_encoder(x_in)
         
-        # WNO Spatial Mixing (No padding needed, 140 and 124 divide evenly by 2!)
-        x_wno = self.block0(x_feat)
-        x_wno = self.block1(x_wno)
-        x_wno = self.block2(x_wno)
-        x_wno = self.block3(x_wno)
+        # WNO Spatial Mixing with skip connection for preserving fine spatial detail
+        x_wno = x_feat
+        skip = None
+        for i, block in enumerate(self.blocks):
+            if i == 2:
+                skip = x_wno  # save features before block 2
+            x_wno = block(x_wno)
+            if i == 4 and skip is not None:
+                x_wno = x_wno + skip  # add early spatial detail back after block 4
         
         # Decode to DELTA (network learns the change from current state)
         x_wno = F.gelu(self.fc1(x_wno))

@@ -60,6 +60,8 @@ print("Generating Topography Map...")
 all_psfc = np.concatenate([np.load(os.path.join(RAW_PATH, m, "psfc.npy")).astype(np.float32) for m in cfg.data.months], axis=0)
 psfc_median = np.median(all_psfc, axis=0)
 topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
+np.save(cfg.paths.topo_path, topo_proxy)
+print(f"Topography proxy saved to: {cfg.paths.topo_path}")
 
 def process_month(month_name):
     month_data = []

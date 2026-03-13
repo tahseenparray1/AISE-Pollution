@@ -9,7 +9,6 @@ from tqdm import tqdm
 from torch.optim import Adam
 from src.utils.config import load_config
 from models.baseline_model import FNO2D
-from torch.optim.swa_utils import AveragedModel, SWALR 
 
 # ==========================================
 # 1. SETUP & CONFIGURATION
@@ -91,14 +90,17 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         temporal_weather = window[:, ..., self.temporal_idx]
         temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
         
-        # 3. Static Emissions (Mean across the 26 hours to collapse to 7 spatial channels)
+        # 3. Temporal Position Encoding (26 channels — tells model which hour each observation is from)
+        hour_encoding = torch.linspace(0, 1, self.total_time).view(1, 1, -1).expand(self.S1, self.S2, -1)
+        
+        # 4. Static Emissions (first frame — they are identical across all timesteps)
         static_emissions = window[0, ..., self.static_idx]
         
-        # 4. Static Topography (1 channel)
+        # 5. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        # Combine everything (10 + 260 + 7 + 1 = 278 Channels)
-        x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
+        # Combine everything (10 + 260 + 26 + 7 + 1 = 304 Channels)
+        x = torch.cat((pm_hist, temporal_weather, hour_encoding, static_emissions, topo), dim=-1)
         
         # Target (uses same config-driven index as input)
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
@@ -115,11 +117,12 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # ==========================================
 pm_channels = cfg.data.time_input
 temporal_channels = 10 * cfg.data.total_time # 10 dynamic features
+hour_channels = cfg.data.total_time # 26 temporal position encoding channels
 static_channels = 7 # 7 emission proxy maps
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
-print(f"Building Model with optimized {in_channels} input channels (Massive memory saving!)...")
+in_channels = pm_channels + temporal_channels + hour_channels + static_channels + topo_channels
+print(f"Building Model with {in_channels} input channels...")
 
 model = FNO2D(
     in_channels=in_channels, 
@@ -130,17 +133,21 @@ model = FNO2D(
 ).to(device)
 
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
-
-
-swa_model = AveragedModel(model)
-swa_start = int(cfg.training.epochs * 0.75)
-swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer, max_lr=3e-3,
+    steps_per_epoch=len(train_loader),
+    epochs=cfg.training.epochs,
+    pct_start=0.1,  # 10% warmup
+    anneal_strategy='cos'
+)
 
 # ==========================================
 # 5. TRAINING LOOP
 # ==========================================
 scaler = torch.amp.GradScaler("cuda")
+
+# Temporal weighting: linearly increasing weights so harder far-future steps get more gradient signal
+time_weights = torch.linspace(1.0, 2.0, cfg.data.time_out).to(device).view(1, 1, 1, -1)
 
 best_val_rmse = float('inf')
 log = []
@@ -153,9 +160,8 @@ for ep in range(cfg.training.epochs):
     for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
         x, y = x.to(device), y.to(device)
         
-        # FIX #2: Apply noise only to continuous features, protecting:
+        # Apply noise only to continuous features, protecting:
         # - Topography (last channel): static elevation proxy from PSFC
-        # - Rain mask (binary 0/1): within temporal channels
         noise = torch.randn_like(x) * 0.01
         noise[..., -1] = 0.0  # Zero out noise for topography (last channel)
         x = x + noise
@@ -169,15 +175,15 @@ for ep in range(cfg.training.epochs):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            # --- NEW LOSS FORMULATION ---
-            # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-            huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+            # --- LOSS FORMULATION ---
+            # 1. Direct MSE with temporal weighting (matches Kaggle RMSE metric)
+            mse_loss = (F.mse_loss(pred_phys, targ_phys, reduction='none') * time_weights).mean()
             
             # 2. Spatial Gradient Loss (Keeps plume edges sharp)
             loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
             
             # 3. Blended Total Loss
-            total_loss = huber_loss + 0.1 * loss_grad
+            total_loss = mse_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
@@ -190,27 +196,17 @@ for ep in range(cfg.training.epochs):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(optimizer)
         scaler.update()
-
-    # --- NEW: SWA SCHEDULER STEP ---
-    if ep >= swa_start:
-        swa_model.update_parameters(model)
-        swa_scheduler.step()
-    else:
-        scheduler.step()
+        scheduler.step()  # OneCycleLR steps per batch
 
     # VALIDATION
-    # Use the SWA model if we have crossed the threshold
-    eval_model = swa_model if ep >= swa_start else model
-    eval_model.eval()
-
+    model.eval()
     val_mse_acc = 0.0
 
     with torch.no_grad():
         for x, y in val_loader:
             x, y = x.to(device), y.to(device)
             
-            # ✅ FIXED BUG: This must be eval_model, otherwise SWA does nothing!
-            out = eval_model(x) 
+            out = model(x) 
             
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
@@ -229,8 +225,7 @@ for ep in range(cfg.training.epochs):
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
         if cfg.training.save_checkpoint:
-            # Save the currently evaluating model's dict (which will be SWA if active)
-            torch.save({'model_state_dict': eval_model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
+            torch.save({'model_state_dict': model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
         print(f"  -> New Best Val RMSE: {best_val_rmse:.4f}")
 
     log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})

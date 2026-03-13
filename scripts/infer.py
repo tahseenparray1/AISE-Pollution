@@ -32,11 +32,9 @@ pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 
 def denorm(x):
     return (x * pm_iqr) + pm_median
 
-# Compute Static Topography Proxy using training stats
-# Note: Since psfc isn't in train.yaml features anymore, we load it directly from test_in just for this map
-psfc_test = np.load(os.path.join(cfg_infer.paths.input_loc, "psfc.npy"))
-psfc_median = np.median(psfc_test, axis=1) # Median over time dimension
-topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
+# Load Static Topography Proxy (same global map used during training)
+print("Loading topography proxy...")
+topo_proxy = np.load(cfg_infer.paths.topo_path).astype(np.float32)
 
 # ==========================================
 # 2. DATA LOADER (PHASE 1 ALIGNED)
@@ -53,7 +51,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         self.emi_variables = cfg_train.features.emission_variables
         
         self.stats = stats_dict
-        self.topo_proxy = topo_proxy
+        self.topo_proxy = topo_proxy  # Single global (140, 124) map, same as training
 
         # Load raw files lazily
         self.arrs = {}
@@ -114,15 +112,18 @@ class TestDataLoader(torch.utils.data.Dataset):
         temporal_stack = np.stack(temporal_feats, axis=0)
         temporal_tensor = torch.from_numpy(temporal_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
-        # Static: Stack -> Mean across time -> (Channels, Time, H, W) -> (Channels, H, W) -> (H, W, Channels)
+        # Static: Use first frame only (matches train.py — emissions are static within a window)
         static_stack = np.stack(static_feats, axis=0)
-        static_tensor = torch.from_numpy(static_stack).mean(dim=1).permute(1, 2, 0)
+        static_tensor = torch.from_numpy(static_stack[:, 0, :, :]).permute(1, 2, 0)
         
-        # Topo
-        topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
+        # Temporal position encoding (matches train.py)
+        hour_encoding = torch.linspace(0, 1, self.total_time).view(1, 1, -1).expand(self.S1, self.S2, -1)
         
-        # Combine (10 + 260 + 7 + 1 = 278 Channels)
-        x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
+        # Topo — single global map, identical for all samples
+        topo_tensor = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
+        
+        # Combine (10 + 260 + 26 + 7 + 1 = 304 Channels)
+        x = torch.cat((pm25_hist, temporal_tensor, hour_encoding, static_tensor, topo_tensor), dim=-1)
 
         return x
 
@@ -134,10 +135,11 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # ==========================================
 pm_channels = cfg_train.data.time_input
 temporal_channels = 10 * cfg_train.data.total_time 
+hour_channels = cfg_train.data.total_time  # 26 temporal position encoding channels
 static_channels = 7 
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+in_channels = pm_channels + temporal_channels + hour_channels + static_channels + topo_channels
 
 print(f"Building WNO Model with optimized {in_channels} input channels...")
 model = FNO2D(
@@ -171,7 +173,7 @@ with torch.no_grad():
         bs = x.size(0)
         
         out = model(x)
-        out_real = denorm(out.cpu().numpy())
+        out_real = np.clip(denorm(out.cpu().numpy()), a_min=0.0, a_max=None)  # PM2.5 can't be negative
         
         prediction[current_idx : current_idx + bs] = out_real
         current_idx += bs
