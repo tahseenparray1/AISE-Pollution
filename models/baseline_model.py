@@ -77,13 +77,13 @@ class WNOBlock(nn.Module):
         b, c_times_4, h, w = x_w.shape
         c = c_times_4 // 4
         # Reshape: (B, C, 4, H, W) -> Permute: (B, 4, C, H, W) -> Flatten: (B, 4*C, H, W)
-        x_w = x_w.view(b, c, 4, h, w).permute(0, 2, 1, h, w).reshape(b, c_times_4, h, w)
+        x_w = x_w.view(b, c, 4, h, w).permute(0, 2, 1, 3, 4).reshape(b, c_times_4, h, w)
         
         # 3. NOW mix frequencies (Groups=4 works perfectly here!)
         x_w = self.spectral_mixer(x_w)
         
         # 4. Reverse the permutation for IDWT
-        x_w = x_w.view(b, 4, c, h, w).permute(0, 2, 1, h, w).reshape(b, c_times_4, h, w)
+        x_w = x_w.view(b, 4, c, h, w).permute(0, 2, 1, 3, 4).reshape(b, c_times_4, h, w)
         
         # 5. Reconstruct back to Spatial domain
         out_w = self.idwt(x_w)
