@@ -22,7 +22,7 @@ torch.backends.cudnn.benchmark = True
 np.random.seed(0)
 
 # === FAST DEV RUN: Set to True for quick testing, False for full training ===
-FAST_DEV_RUN = False
+FAST_DEV_RUN = True
 MAX_BATCHES = 10 if FAST_DEV_RUN else None  # None = use all batches
 MAX_EPOCHS = 10 if FAST_DEV_RUN else cfg.training.epochs
 
