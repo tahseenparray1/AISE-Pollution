@@ -46,7 +46,7 @@ def compute_gridwise_robust_stats(features, months):
         
         median = np.median(feat_data, axis=0)
         q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
-        iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
+        iqr = np.clip(q75 - q25, a_min=1.0, a_max=None)
         
         stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32)}
         

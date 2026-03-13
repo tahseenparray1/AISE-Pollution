@@ -169,14 +169,14 @@ for ep in range(cfg.training.epochs):
             targ_phys = to_physical(y)
             
             # --- LOSS FORMULATION ---
-            # 1. Huber Loss in physical space
-            huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+            # 1. MSE in physical space (directly matches Kaggle RMSE metric)
+            mse_loss = F.mse_loss(pred_phys, targ_phys)
             
             # 2. Spatial Gradient Loss (Keeps plume edges sharp)
             loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
             
             # 3. Blended Total Loss
-            total_loss = huber_loss + 0.1 * loss_grad
+            total_loss = mse_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
