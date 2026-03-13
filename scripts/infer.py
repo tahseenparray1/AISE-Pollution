@@ -116,14 +116,11 @@ class TestDataLoader(torch.utils.data.Dataset):
         static_stack = np.stack(static_feats, axis=0)
         static_tensor = torch.from_numpy(static_stack[:, 0, :, :]).permute(1, 2, 0)
         
-        # Temporal position encoding (matches train.py)
-        hour_encoding = torch.linspace(0, 1, self.total_time).view(1, 1, -1).expand(self.S1, self.S2, -1)
-        
         # Topo — single global map, identical for all samples
         topo_tensor = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
         
-        # Combine (10 + 260 + 26 + 7 + 1 = 304 Channels)
-        x = torch.cat((pm25_hist, temporal_tensor, hour_encoding, static_tensor, topo_tensor), dim=-1)
+        # Combine (10 + 260 + 7 + 1 = 278 Channels)
+        x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
 
         return x
 
@@ -135,11 +132,10 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # ==========================================
 pm_channels = cfg_train.data.time_input
 temporal_channels = 10 * cfg_train.data.total_time 
-hour_channels = cfg_train.data.total_time  # 26 temporal position encoding channels
 static_channels = 7 
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + hour_channels + static_channels + topo_channels
+in_channels = pm_channels + temporal_channels + static_channels + topo_channels
 
 print(f"Building WNO Model with optimized {in_channels} input channels...")
 model = FNO2D(
