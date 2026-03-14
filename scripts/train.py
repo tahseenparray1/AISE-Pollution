@@ -48,6 +48,37 @@ def spatial_gradient_loss(pred_phys, target_phys):
     dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
     return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
 
+def log_layer_dynamics(model, epoch):
+    """ Logs the average absolute weight and gradient magnitude of major network blocks """
+    logging.info(f"--- Epoch {epoch} Layer Dynamics (Mean L1 Norm) ---")
+    
+    blocks_to_track = {
+        'Temporal Encoder': 'temporal_encoder',
+        'Input Encoder': 'input_encoder',
+        'WNO Block 0': 'block0',
+        'WNO Block 1': 'block1',
+        'WNO Block 2': 'block2',
+        'WNO Block 3': 'block3',
+        'Output FC1': 'fc1',
+        'Output FC2': 'fc2'
+    }
+
+    for block_name, prefix in blocks_to_track.items():
+        weight_sum, grad_sum, count = 0.0, 0.0, 0
+        for name, param in model.named_parameters():
+            if name.startswith(prefix) and param.requires_grad:
+                weight_sum += param.abs().mean().item()
+                if param.grad is not None:
+                    grad_sum += param.grad.abs().mean().item()
+                count += 1
+                
+        if count > 0:
+            avg_weight = weight_sum / count
+            avg_grad = grad_sum / count
+            logging.info(f" -> {block_name:18s} | Weight: {avg_weight:.6f} | Gradient: {avg_grad:.6f}")
+    
+    logging.info("--------------------------------------------------")
+
 # ==========================================
 # 3. DATA LOADER
 # ==========================================
@@ -137,6 +168,28 @@ model = FNO2D(
     num_temporal_features=10  # Based on the 10 dynamic features
 ).to(device)
 
+def log_model_summary(model):
+    logging.info("========================================")
+    logging.info("       WNO MODEL ARCHITECTURE SIZES      ")
+    logging.info("========================================")
+    total_params = 0
+    trainable_params = 0
+    for name, param in model.named_parameters():
+        params_count = param.numel()
+        total_params += params_count
+        if param.requires_grad:
+            trainable_params += params_count
+            logging.info(f" -> {name:40s} | {params_count:,} params | Shape: {list(param.shape)}")
+        else:
+            logging.info(f" -> {name:40s} | {params_count:,} params | Shape: {list(param.shape)} (FROZEN)")
+            
+    logging.info("----------------------------------------")
+    logging.info(f" Total Parameters:     {total_params:,}")
+    logging.info(f" Trainable Parameters: {trainable_params:,}")
+    logging.info("========================================")
+
+log_model_summary(model)
+
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
 
@@ -155,8 +208,12 @@ for ep in range(cfg.training.epochs):
     model.train()
     t_start = time.time()
     train_mse_acc = 0.0
+    
+    current_lr = optimizer.param_groups[0]['lr']
+    logging.info(f"--- Starting Epoch {ep} | LR: {current_lr:.6f} ---")
 
-    for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
+    for step, (x, y) in enumerate(tqdm(train_loader, desc=f"Epoch {ep}")):
+        step_start = time.time()
         x, y = x.to(device), y.to(device)
         
         # FIX #2: Apply noise only to continuous features, protecting:
@@ -192,6 +249,23 @@ for ep in range(cfg.training.epochs):
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        
+        step_duration = time.time() - step_start
+        if step % 20 == 0:
+            mem_allocated = torch.cuda.memory_allocated(device) / (1024 ** 2) if torch.cuda.is_available() else 0
+            log_msg = (
+                f"Epoch {ep:02d} | Step {step:04d}/{len(train_loader)} | "
+                f"Time/Batch: {step_duration:.3f}s | "
+                f"Loss Total: {total_loss.item():.4f} | "
+                f"Huber: {huber_loss.item():.4f} | "
+                f"Grad: {loss_grad.item():.4f} | "
+                f"GPU Mem: {mem_allocated:.1f}MB"
+            )
+            logging.info(log_msg)
+
+    # --- NEW: LOG LAYER DYNAMICS ---
+    # Captures the state of the network weights and gradients right after the last training batch
+    log_layer_dynamics(model, ep)
 
     # --- NEW: SWA SCHEDULER STEP ---
     if ep >= swa_start:
@@ -206,6 +280,10 @@ for ep in range(cfg.training.epochs):
     eval_model.eval()
 
     val_mse_acc = 0.0
+    val_high_pm_mse_acc = 0.0
+    val_low_pm_mse_acc = 0.0
+    high_pm_count = 0
+    low_pm_count = 0
 
     with torch.no_grad():
         for x, y in val_loader:
@@ -220,13 +298,31 @@ for ep in range(cfg.training.epochs):
             # Apply ReLU to mimic the physical world constraint for our final score
             pred_phys_clipped = F.relu(pred_phys)
             
+            # Global Validation Step
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
+            
+            # Data Specific Analysis Step (Extreme Spikes vs Clear Conditions)
+            # Define high pollution threshold > 100 ug/m3, Low pollution < 30 ug/m3
+            high_mask = targ_phys > 100.0
+            low_mask = targ_phys < 30.0
+            
+            if high_mask.any():
+                val_high_pm_mse_acc += torch.mean((pred_phys_clipped[high_mask] - targ_phys[high_mask]) ** 2).item() * high_mask.sum().item()
+                high_pm_count += high_mask.sum().item()
+                
+            if low_mask.any():
+                val_low_pm_mse_acc += torch.mean((pred_phys_clipped[low_mask] - targ_phys[low_mask]) ** 2).item() * low_mask.sum().item()
+                low_pm_count += low_mask.sum().item()
 
     train_rmse = np.sqrt(train_mse_acc / len(train_loader))
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
     
+    val_high_rmse = np.sqrt(val_high_pm_mse_acc / max(1, high_pm_count))
+    val_low_rmse = np.sqrt(val_low_pm_mse_acc / max(1, low_pm_count))
+    
     duration = time.time() - t_start
-    msg = f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}"
+    msg = (f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | "
+           f"Val RMSE: {val_rmse:.4f} | High PM Val RMSE: {val_high_rmse:.4f} | Low PM Val RMSE: {val_low_rmse:.4f}")
     print(msg)
     logging.info(msg)
 
