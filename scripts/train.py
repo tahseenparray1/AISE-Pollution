@@ -133,6 +133,12 @@ swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
 # ==========================================
 # 5. TRAINING LOOP
 # ==========================================
+# Create a linearly increasing weight tensor for the 16 hours
+# E.g., Hour 1 gets a weight of 1.0, Hour 16 gets a weight of ~3.0
+time_weights = torch.linspace(1.0, 3.0, steps=cfg.data.time_out).to(device)
+# Reshape to broadcast correctly against (Batch, H, W, Time)
+time_weights = time_weights.view(1, 1, 1, cfg.data.time_out)
+
 scaler = torch.amp.GradScaler("cuda")
 
 best_val_rmse = float('inf')
@@ -160,8 +166,15 @@ for ep in range(MAX_EPOCHS):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            # Pure MSE in physical space (directly matches Kaggle RMSE metric)
-            total_loss = F.mse_loss(pred_phys, targ_phys)
+            # --- TIME-WEIGHTED MSE LOSS ---
+            # 1. Calculate raw squared error per pixel per timestep
+            raw_sq_error = (pred_phys - targ_phys) ** 2
+            
+            # 2. Multiply by our temporal penalty (punish later hours more)
+            weighted_sq_error = raw_sq_error * time_weights
+            
+            # 3. Take the mean to get the final scalar loss
+            total_loss = torch.mean(weighted_sq_error)
 
         
         with torch.no_grad():
