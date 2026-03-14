@@ -60,7 +60,7 @@ def compute_gridwise_robust_stats(features, months):
         q75, q25 = np.percentile(feat_data_train, [75, 25], axis=0)
         
         if feat == 'rain_mask':
-            iqr = np.clip(q75 - q25, a_min=1e-5, a_max=None)
+            iqr = np.clip(q75 - q25, a_min=1.0, a_max=None)
         else:
             iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
         
