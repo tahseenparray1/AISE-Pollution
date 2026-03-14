@@ -25,7 +25,6 @@ features:
   derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
 
 model:
-  modes: 16
   width: 256
 
 training:
