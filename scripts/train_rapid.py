@@ -110,7 +110,6 @@ model = FNO2D(
     in_channels=in_channels, 
     time_out=cfg.data.time_out, 
     width=cfg.model.width, 
-    modes=cfg.model.modes,
     time_input=cfg.data.time_input
 ).to(device)
 
