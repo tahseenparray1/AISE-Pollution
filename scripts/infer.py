@@ -84,6 +84,11 @@ class TestDataLoader(torch.utils.data.Dataset):
         seq_raw['vent_coef'] = vc
         seq_raw['rain_mask'] = rm
         
+        # Photochemical Cross Features
+        seq_raw['photo_nox'] = seq_raw['NOx'] * seq_raw['swdown']
+        seq_raw['photo_so2'] = seq_raw['SO2'] * seq_raw['swdown']
+        seq_raw['photo_voc'] = (seq_raw['NMVOC_finn'] + seq_raw['NMVOC_e']) * seq_raw['swdown']
+        
         # 3. Apply Log Transforms (Weather only!)
         skewed_features = ['rain', 'pblh']
         for feat in skewed_features:

@@ -18,11 +18,11 @@ data:
   stride: 4
 
 features:
-  V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
+  V: 21 # 1 PM2.5 + 7 met + 7 emi + 6 derived
   met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"] # psfc removed
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
+  derived_variables: ["wind_speed", "vent_coef", "rain_mask", "photo_nox", "photo_so2", "photo_voc"]
 
 model:
   modes: 8
