@@ -88,6 +88,19 @@ class FNO2D(nn.Module):
         self.width = width
         self.time_out = time_out
         self.time_input = time_input  # Number of PM2.5 history hours (for residual connection)
+        self.total_time = 26 # Hardcoded based on your dataset
+        
+        # We know we have 17 dynamic features (10 met + 7 emi) + 1 topo + 10 pm25
+        self.dynamic_features = 17
+        
+        # NEW: A Temporal Convolution to process the time sequence BEFORE flattening
+        # Takes in (Batch, Features, Time, H, W) and mixes across Time
+        self.temporal_conv = nn.Conv3d(
+            in_channels=self.dynamic_features, 
+            out_channels=self.dynamic_features, 
+            kernel_size=(3, 1, 1), # Only mix across time (size 3), leave space alone
+            padding=(1, 0, 0)
+        )
         
         # Encode ablated input down to 'width'
         # FIX #3: Use standard Dropout instead of Dropout2d to avoid
@@ -120,7 +133,28 @@ class FNO2D(nn.Module):
         # Extract last known PM2.5 state for residual connection
         last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2) 
         
-        x_in = x.permute(0, 3, 1, 2)
+        # --- NEW TEMPORAL PROCESSING BLOCK ---
+        # x is currently (B, H, W, 453)
+        # Let's extract the temporal stack (middle 442 channels)
+        pm_hist = x[..., :10]
+        temporal_flat = x[..., 10:-1] # 442 channels (17 features * 26 hours)
+        topo = x[..., -1:]
+        
+        # Reshape to 3D: (Batch, Features, Time, H, W)
+        # 442 = 17 * 26
+        t_3d = temporal_flat.view(b, nx, ny, self.total_time, self.dynamic_features).permute(0, 4, 3, 1, 2)
+        
+        # Apply Temporal Convolution
+        t_3d = F.gelu(self.temporal_conv(t_3d))
+        
+        # Flatten back to 2D format for the Wavelet operator
+        t_flat = t_3d.permute(0, 3, 4, 2, 1).reshape(b, nx, ny, -1)
+        
+        # Recombine
+        x_new = torch.cat([pm_hist, t_flat, topo], dim=-1)
+        # ------------------------------------
+        
+        x_in = x_new.permute(0, 3, 1, 2)
         grid = self.get_grid(b, nx, ny, x.device) 
         x_in = torch.cat([x_in, grid], dim=1) 
         
