@@ -104,7 +104,7 @@ model:
 
 training:
   batch_size: 16
-  epochs: 100
+  epochs: 70
   lr: 1e-3
   weight_decay: 1e-5
   checkpoint_every: 10
@@ -129,7 +129,7 @@ data:
   S1: 140
   S2: 124
   total_time: 26
-  stride: 4
+  stride: 24
 
 features:
   V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
@@ -147,7 +147,7 @@ training:
   lr: 1e-3
   weight_decay: 1e-5
   checkpoint_every: 10
-  save_checkpoint: True
+  save_checkpoint: False
   early_stopping: False
 
 ===== C:\Code\AISE\models\baseline_model.py =====
@@ -210,7 +210,8 @@ class WNOBlock(nn.Module):
         
         # FIX #4: Depthwise conv with large kernel to expand receptive field
         # Enables modeling long-range wind advection across the 140x124 spatial grid
-        self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=4, dilation=2, groups=width)
+        # Change this back to padding=2, remove dilation
+        self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=2, groups=width)
         self.pointwise = nn.Conv2d(width, width, 1)
         self.norm = nn.GroupNorm(4, width)
 
@@ -240,6 +241,19 @@ class FNO2D(nn.Module):
         self.width = width
         self.time_out = time_out
         self.time_input = time_input  # Number of PM2.5 history hours (for residual connection)
+        self.total_time = 26 # Hardcoded based on your dataset
+        
+        # We know we have 17 dynamic features (10 met + 7 emi) + 1 topo + 10 pm25
+        self.dynamic_features = 17
+        
+        # NEW: A Temporal Convolution to process the time sequence BEFORE flattening
+        # Takes in (Batch, Features, Time, H, W) and mixes across Time
+        self.temporal_conv = nn.Conv3d(
+            in_channels=self.dynamic_features, 
+            out_channels=self.dynamic_features, 
+            kernel_size=(3, 1, 1), # Only mix across time (size 3), leave space alone
+            padding=(1, 0, 0)
+        )
         
         # Encode ablated input down to 'width'
         # FIX #3: Use standard Dropout instead of Dropout2d to avoid
@@ -272,7 +286,28 @@ class FNO2D(nn.Module):
         # Extract last known PM2.5 state for residual connection
         last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2) 
         
-        x_in = x.permute(0, 3, 1, 2)
+        # --- NEW TEMPORAL PROCESSING BLOCK ---
+        # x is currently (B, H, W, 453)
+        # Let's extract the temporal stack (middle 442 channels)
+        pm_hist = x[..., :10]
+        temporal_flat = x[..., 10:-1] # 442 channels (17 features * 26 hours)
+        topo = x[..., -1:]
+        
+        # Reshape to 3D: (Batch, Features, Time, H, W)
+        # 442 = 17 * 26
+        t_3d = temporal_flat.view(b, nx, ny, self.total_time, self.dynamic_features).permute(0, 4, 3, 1, 2)
+        
+        # Apply Temporal Convolution
+        t_3d = F.gelu(self.temporal_conv(t_3d))
+        
+        # Flatten back to 2D format for the Wavelet operator
+        t_flat = t_3d.permute(0, 3, 4, 2, 1).reshape(b, nx, ny, -1)
+        
+        # Recombine
+        x_new = torch.cat([pm_hist, t_flat, topo], dim=-1)
+        # ------------------------------------
+        
+        x_in = x_new.permute(0, 3, 1, 2)
         grid = self.get_grid(b, nx, ny, x.device) 
         x_in = torch.cat([x_in, grid], dim=1) 
         
@@ -386,9 +421,15 @@ class TestDataLoader(torch.utils.data.Dataset):
         seq_raw['rain_mask'] = rm
         
         # 3. Apply Log Transforms
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh']
+        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+        for feat in emi_vars:
+            if feat in seq_raw:
+                seq_raw[feat] = np.log1p(seq_raw[feat] * 1e6)
+                
+        skewed_features = ['rain', 'pblh']
         for feat in skewed_features:
-            seq_raw[feat] = np.log1p(seq_raw[feat])
+            if feat in seq_raw:
+                seq_raw[feat] = np.log1p(seq_raw[feat])
 
         # 4. Normalize and Categorize Features
         pm25_hist = None
@@ -520,9 +561,15 @@ def load_raw_or_derived(feat, month):
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         
-        # --- THE FIX: pblh added to log transform to compress diurnal variance ---
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh'] 
-        if feat in skewed_features:
+        # --- NEW: UNMASK THE EMISSIONS ---
+        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+        if feat in emi_vars:
+            arr = arr * 1e6  # Scale up so the network can see it!
+            arr = np.log1p(arr) # Now log1p will actually work
+            return arr
+            
+        # Non-emission skewed features
+        if feat in ['rain', 'pblh']: 
             arr = np.log1p(arr)
             
         return arr
@@ -536,7 +583,8 @@ def compute_gridwise_robust_stats(features, months):
         
         median = np.median(feat_data, axis=0)
         q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
-        iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
+        clip_min = 5.0 if feat not in cfg.features.emission_variables_raw else 0.1
+        iqr = np.clip(q75 - q25, a_min=clip_min, a_max=None)
         
         stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32)}
         
@@ -721,7 +769,9 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # ==========================================
 # 4. MODEL & OPTIMIZER
 # ==========================================
+pm_channels = cfg.data.time_input
 temporal_channels = 10 * cfg.data.total_time # 10 dynamic features
+static_channels = 7 # 7 emission proxy maps
 topo_channels = 1
 
 in_channels = pm_channels + temporal_channels + static_channels + topo_channels
@@ -766,21 +816,14 @@ for ep in range(cfg.training.epochs):
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Single Forward Pass (Direct Multi-Step)
         out = model(x)
         
         pred_phys = to_physical(out)
         targ_phys = to_physical(y)
         
-        # --- NEW LOSS FORMULATION ---
-        # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
-        
-        # 2. Spatial Gradient Loss (Keeps plume edges sharp)
+        mse_loss = F.mse_loss(pred_phys, targ_phys)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-        
-        # 3. Blended Total Loss
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = mse_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
@@ -1054,10 +1097,8 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         assert 'cpm25' in all_features, "Target variable 'cpm25' must be in met_variables!"
         self.target_idx = all_features.index('cpm25')
         
-        self.temporal_idx = [i for i, f in enumerate(all_features) 
-                           if f != 'cpm25' and f not in cfg.features.emission_variables]
-        self.static_idx = [i for i, f in enumerate(all_features) 
-                          if f in cfg.features.emission_variables]
+        # ALL features (weather + emissions) except the target are now temporal!
+        self.temporal_idx = [i for i, f in enumerate(all_features) if f != 'cpm25']
         self.topo_idx = len(all_features)
 
     def __len__(self): 
@@ -1067,13 +1108,18 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         start = self.valid_starts[idx]
         window = self.data[start : start + self.total_time].clone() 
         
+        # 1. PM2.5 Historical Context (10 channels)
         pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
-        temporal_weather = window[:, ..., self.temporal_idx]
-        temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
-        static_emissions = window[:, ..., self.static_idx].mean(dim=0)
+        
+        # 2. Dynamic Temporal Features (Weather AND Emissions: 17 features * 26 hours)
+        temporal_all = window[:, ..., self.temporal_idx]
+        temporal_tensor = temporal_all.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
+        
+        # 3. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
+        # Combine (10 + 442 + 1 = 453 Channels)
+        x = torch.cat((pm_hist, temporal_tensor, topo), dim=-1)
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
         return x, y
 
@@ -1089,11 +1135,11 @@ print(f"Rapid Dataset: {len(train_ds)} train samples, {len(val_ds)} val samples"
 # 4. MODEL & OPTIMIZER (No SWA)
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time
-static_channels = 7
+# Dynamically calculate based on the new temporal stack (17 * 26 = 442)
+temporal_channels = len(train_ds.temporal_idx) * cfg.data.total_time
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+in_channels = pm_channels + temporal_channels + topo_channels
 print(f"Building Model with optimized {in_channels} input channels...")
 
 model = FNO2D(
