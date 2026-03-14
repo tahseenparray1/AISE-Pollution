@@ -99,7 +99,7 @@ print(f"Rapid Dataset: {len(train_ds)} train samples, {len(val_ds)} val samples"
 # 4. MODEL & OPTIMIZER (No SWA)
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time
+temporal_channels = 11 * cfg.data.total_time
 static_channels = 7
 topo_channels = 1
 

@@ -112,9 +112,7 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # ==========================================
 # 4. MODEL & OPTIMIZER
 # ==========================================
-pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time # 10 dynamic features
-static_channels = 7 # 7 emission proxy maps
+temporal_channels = 11 * cfg.data.total_time # 11 dynamic features
 topo_channels = 1
 
 in_channels = pm_channels + temporal_channels + static_channels + topo_channels
