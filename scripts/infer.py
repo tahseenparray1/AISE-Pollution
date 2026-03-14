@@ -32,11 +32,9 @@ pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 
 def denorm(x):
     return (x * pm_iqr) + pm_median
 
-# Compute Static Topography Proxy using training stats
-# Note: Since psfc isn't in train.yaml features anymore, we load it directly from test_in just for this map
-psfc_test = np.load(os.path.join(cfg_infer.paths.input_loc, "psfc.npy"))
-psfc_median = np.median(psfc_test, axis=1) # Median over time dimension
-topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
+# Load correct Topography Proxy from disk
+topo_proxy_path = getattr(cfg_infer.paths, "topo_path", os.path.join(os.path.dirname(cfg_infer.paths.stats_path), "topo_proxy.npy"))
+topo_proxy = np.load(topo_proxy_path)
 
 # ==========================================
 # 2. DATA LOADER (PHASE 1 ALIGNED)
@@ -55,11 +53,12 @@ class TestDataLoader(torch.utils.data.Dataset):
         self.stats = stats_dict
         self.topo_proxy = topo_proxy
 
-        # Load raw files lazily
+        # Load raw files fully into RAM to avoid I/O bottlenecks during inference
+        print("Loading test arrays into memory...")
         self.arrs = {}
         for feat in self.met_variables + self.emi_variables:
             path = os.path.join(cfg_infer.paths.input_loc, f"{feat}.npy")
-            self.arrs[feat] = np.load(path, mmap_mode="r")
+            self.arrs[feat] = np.load(path)
 
         self.N = self.arrs['cpm25'].shape[0]
 
@@ -145,7 +144,9 @@ model = FNO2D(
     time_out=cfg_train.data.time_out,
     width=cfg_train.model.width,
     modes=cfg_train.model.modes,
-    time_input=cfg_train.data.time_input
+    time_input=cfg_train.data.time_input,
+    total_time=cfg_train.data.total_time,
+    num_temporal_features=10
 ).to(device)
 
 checkpoint_path = cfg_train.paths.model_save_path.replace(".pt", "_best.pt")

@@ -158,6 +158,27 @@ class InverseHaarWavelet2D(nn.Module):
         # Reconstructs using transposed convolution
         return F.conv_transpose2d(x, self.filters, stride=2, groups=self.in_channels)
 
+class TemporalEncoder(nn.Module):
+    """ Extracts temporal derivatives and preserves event timing """
+    def __init__(self, in_features, hidden_dim, out_features, total_time=26):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_features, hidden_dim, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1)
+        
+        # Replace pooling with a Flatten + Linear mapping
+        self.flatten_dim = hidden_dim * total_time
+        self.fc = nn.Linear(self.flatten_dim, out_features)
+
+    def forward(self, x):
+        # x is expected to be (Batch, Features, Time)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        
+        # Flatten the feature and time dimensions
+        x = x.view(x.size(0), -1) # Now safe to use .view() here
+        x = self.fc(x)            # (Batch, out_features)
+        return x
+
 class WNOBlock(nn.Module):
     """ Wavelet Neural Operator Block with Extended Receptive Field """
     def __init__(self, width):
@@ -197,17 +218,27 @@ class WNOBlock(nn.Module):
 
 class FNO2D(nn.Module):
     # Renamed internal structure to WNO, kept class name FNO2D to prevent breaking your train.py imports!
-    def __init__(self, in_channels, time_out=16, width=64, modes=None, time_input=10):
+    def __init__(self, in_channels, time_out=16, width=64, modes=None, time_input=10, total_time=26, num_temporal_features=10):
         super().__init__()
         self.width = width
         self.time_out = time_out
         self.time_input = time_input  # Number of PM2.5 history hours (for residual connection)
+        self.total_time = total_time
+        self.num_temporal_features = num_temporal_features
+        
+        self.temporal_encoder = TemporalEncoder(num_temporal_features, 32, 32, total_time=total_time)
+        
+        # New in channels calculation: (pm history) + (encoded temporal) + (static & topo)
+        original_temporal_channels = self.total_time * self.num_temporal_features
+        static_topo_channels = in_channels - self.time_input - original_temporal_channels
+        
+        new_in_channels = self.time_input + 32 + static_topo_channels
         
         # Encode ablated input down to 'width'
         # FIX #3: Use standard Dropout instead of Dropout2d to avoid
         # dropping entire temporal channels (e.g. "Hour 5 Wind Speed")
         self.input_encoder = nn.Sequential(
-            nn.Conv2d(in_channels + 2, width, kernel_size=1),
+            nn.Conv2d(new_in_channels + 2, width, kernel_size=1),
             nn.GroupNorm(4, width),
             nn.GELU(),
             nn.Dropout(p=0.05)
@@ -234,7 +265,29 @@ class FNO2D(nn.Module):
         # Extract last known PM2.5 state for residual connection
         last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2) 
         
-        x_in = x.permute(0, 3, 1, 2)
+        # Slice X into components
+        c0 = self.time_input
+        c1 = c0 + self.total_time * self.num_temporal_features
+        
+        pm = x[..., :c0]
+        temporal = x[..., c0:c1]
+        static_topo = x[..., c1:]
+        
+        # Process temporal through TemporalEncoder
+        # temporal shape: (b, nx, ny, total_time * num_temporal_features)
+        # where we know the inner dimension is grouped by time * features 
+        # specifically it was: (H, W, time, features) flattened, thus (total_time, num_temporal_features)
+        temporal = temporal.reshape(b, nx, ny, self.total_time, self.num_temporal_features)
+        # (b * nx * ny, num_temporal_features, total_time) for Conv1d
+        temporal_flat = temporal.permute(0, 1, 2, 4, 3).reshape(-1, self.num_temporal_features, self.total_time)
+        
+        temporal_encoded = self.temporal_encoder(temporal_flat) # (b * nx * ny, 32)
+        temporal_encoded = temporal_encoded.reshape(b, nx, ny, 32)
+        
+        # Re-concatenate
+        x_new = torch.cat([pm, temporal_encoded, static_topo], dim=-1)
+        
+        x_in = x_new.permute(0, 3, 1, 2)
         grid = self.get_grid(b, nx, ny, x.device) 
         x_in = torch.cat([x_in, grid], dim=1) 
         
@@ -296,11 +349,9 @@ pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 
 def denorm(x):
     return (x * pm_iqr) + pm_median
 
-# Compute Static Topography Proxy using training stats
-# Note: Since psfc isn't in train.yaml features anymore, we load it directly from test_in just for this map
-psfc_test = np.load(os.path.join(cfg_infer.paths.input_loc, "psfc.npy"))
-psfc_median = np.median(psfc_test, axis=1) # Median over time dimension
-topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
+# Load correct Topography Proxy from disk
+topo_proxy_path = getattr(cfg_infer.paths, "topo_path", os.path.join(os.path.dirname(cfg_infer.paths.stats_path), "topo_proxy.npy"))
+topo_proxy = np.load(topo_proxy_path)
 
 # ==========================================
 # 2. DATA LOADER (PHASE 1 ALIGNED)
@@ -319,11 +370,12 @@ class TestDataLoader(torch.utils.data.Dataset):
         self.stats = stats_dict
         self.topo_proxy = topo_proxy
 
-        # Load raw files lazily
+        # Load raw files fully into RAM to avoid I/O bottlenecks during inference
+        print("Loading test arrays into memory...")
         self.arrs = {}
         for feat in self.met_variables + self.emi_variables:
             path = os.path.join(cfg_infer.paths.input_loc, f"{feat}.npy")
-            self.arrs[feat] = np.load(path, mmap_mode="r")
+            self.arrs[feat] = np.load(path)
 
         self.N = self.arrs['cpm25'].shape[0]
 
@@ -409,7 +461,9 @@ model = FNO2D(
     time_out=cfg_train.data.time_out,
     width=cfg_train.model.width,
     modes=cfg_train.model.modes,
-    time_input=cfg_train.data.time_input
+    time_input=cfg_train.data.time_input,
+    total_time=cfg_train.data.total_time,
+    num_temporal_features=10
 ).to(device)
 
 checkpoint_path = cfg_train.paths.model_save_path.replace(".pt", "_best.pt")
@@ -494,14 +548,26 @@ def load_raw_or_derived(feat, month):
         return arr
 
 def compute_gridwise_robust_stats(features, months):
-    print("Calculating Grid-Wise Robust Statistics...")
+    print("Calculating Grid-Wise Robust Statistics (Train Only)...")
     stats = {}
+    cycle_size = (12 * 24) + (3 * 24)
+    train_len = 12 * 24
+
     for feat in tqdm(features, desc="Scanning features"):
-        feat_data = [load_raw_or_derived(feat, month) for month in months]
-        feat_data = np.concatenate(feat_data, axis=0)
+        feat_data_train = []
+        for month in months:
+            arr = load_raw_or_derived(feat, month)
+            total_hours = arr.shape[0]
+            mask = np.zeros(total_hours, dtype=bool)
+            for start_idx in range(0, total_hours, cycle_size):
+                end_train = min(start_idx + train_len, total_hours)
+                mask[start_idx:end_train] = True
+            feat_data_train.append(arr[mask])
+            
+        feat_data_train = np.concatenate(feat_data_train, axis=0)
         
-        median = np.median(feat_data, axis=0)
-        q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
+        median = np.median(feat_data_train, axis=0)
+        q75, q25 = np.percentile(feat_data_train, [75, 25], axis=0)
         iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
         
         stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32)}
@@ -512,10 +578,24 @@ def compute_gridwise_robust_stats(features, months):
 global_stats = compute_gridwise_robust_stats(all_features, cfg.data.months)
 
 # Generate Topography from PSFC (Loaded explicitly just for this)
-print("Generating Topography Map...")
-all_psfc = np.concatenate([np.load(os.path.join(RAW_PATH, m, "psfc.npy")).astype(np.float32) for m in cfg.data.months], axis=0)
-psfc_median = np.median(all_psfc, axis=0)
+print("Generating Topography Map (Train Only)...")
+psfc_train = []
+cycle_size = (12 * 24) + (3 * 24)
+train_len = 12 * 24
+
+for m in cfg.data.months:
+    arr = np.load(os.path.join(RAW_PATH, m, "psfc.npy")).astype(np.float32)
+    total_hours = arr.shape[0]
+    mask = np.zeros(total_hours, dtype=bool)
+    for start_idx in range(0, total_hours, cycle_size):
+        end_train = min(start_idx + train_len, total_hours)
+        mask[start_idx:end_train] = True
+    psfc_train.append(arr[mask])
+
+all_psfc_train = np.concatenate(psfc_train, axis=0)
+psfc_median = np.median(all_psfc_train, axis=0)
 topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
+np.save(os.path.join(os.path.dirname(cfg.paths.stats_path), "topo_proxy.npy"), topo_proxy)
 
 def process_month(month_name):
     month_data = []
@@ -579,6 +659,7 @@ FILE: scripts/train.py
 import os
 import time
 import json
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -593,6 +674,12 @@ from torch.optim.swa_utils import AveragedModel, SWALR
 # 1. SETUP & CONFIGURATION
 # ==========================================
 cfg = load_config("configs/train.yaml")
+
+logging.basicConfig(
+    filename=getattr(cfg.paths, 'log_path', 'training.log'),
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(0)
@@ -703,7 +790,9 @@ model = FNO2D(
     time_out=cfg.data.time_out, 
     width=cfg.model.width, 
     modes=cfg.model.modes,
-    time_input=cfg.data.time_input
+    time_input=cfg.data.time_input,
+    total_time=cfg.data.total_time,
+    num_temporal_features=10  # Based on the 10 dynamic features
 ).to(device)
 
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
@@ -795,14 +884,18 @@ for ep in range(cfg.training.epochs):
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
     
     duration = time.time() - t_start
-    print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
+    msg = f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}"
+    print(msg)
+    logging.info(msg)
 
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
         if cfg.training.save_checkpoint:
             # Save the currently evaluating model's dict (which will be SWA if active)
             torch.save({'model_state_dict': eval_model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
-        print(f"  -> New Best Val RMSE: {best_val_rmse:.4f}")
+        best_msg = f"  -> New Best Val RMSE: {best_val_rmse:.4f}"
+        print(best_msg)
+        logging.info(best_msg)
 
     log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})
     with open(cfg.paths.save_dir, 'w') as f: json.dump(log, f)

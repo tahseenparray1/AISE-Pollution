@@ -44,6 +44,27 @@ class InverseHaarWavelet2D(nn.Module):
         # Reconstructs using transposed convolution
         return F.conv_transpose2d(x, self.filters, stride=2, groups=self.in_channels)
 
+class TemporalEncoder(nn.Module):
+    """ Extracts temporal derivatives and preserves event timing """
+    def __init__(self, in_features, hidden_dim, out_features, total_time=26):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_features, hidden_dim, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1)
+        
+        # Replace pooling with a Flatten + Linear mapping
+        self.flatten_dim = hidden_dim * total_time
+        self.fc = nn.Linear(self.flatten_dim, out_features)
+
+    def forward(self, x):
+        # x is expected to be (Batch, Features, Time)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        
+        # Flatten the feature and time dimensions
+        x = x.view(x.size(0), -1) # Now safe to use .view() here
+        x = self.fc(x)            # (Batch, out_features)
+        return x
+
 class WNOBlock(nn.Module):
     """ Wavelet Neural Operator Block with Extended Receptive Field """
     def __init__(self, width):
@@ -83,17 +104,27 @@ class WNOBlock(nn.Module):
 
 class FNO2D(nn.Module):
     # Renamed internal structure to WNO, kept class name FNO2D to prevent breaking your train.py imports!
-    def __init__(self, in_channels, time_out=16, width=64, modes=None, time_input=10):
+    def __init__(self, in_channels, time_out=16, width=64, modes=None, time_input=10, total_time=26, num_temporal_features=10):
         super().__init__()
         self.width = width
         self.time_out = time_out
         self.time_input = time_input  # Number of PM2.5 history hours (for residual connection)
+        self.total_time = total_time
+        self.num_temporal_features = num_temporal_features
+        
+        self.temporal_encoder = TemporalEncoder(num_temporal_features, 32, 32, total_time=total_time)
+        
+        # New in channels calculation: (pm history) + (encoded temporal) + (static & topo)
+        original_temporal_channels = self.total_time * self.num_temporal_features
+        static_topo_channels = in_channels - self.time_input - original_temporal_channels
+        
+        new_in_channels = self.time_input + 32 + static_topo_channels
         
         # Encode ablated input down to 'width'
         # FIX #3: Use standard Dropout instead of Dropout2d to avoid
         # dropping entire temporal channels (e.g. "Hour 5 Wind Speed")
         self.input_encoder = nn.Sequential(
-            nn.Conv2d(in_channels + 2, width, kernel_size=1),
+            nn.Conv2d(new_in_channels + 2, width, kernel_size=1),
             nn.GroupNorm(4, width),
             nn.GELU(),
             nn.Dropout(p=0.05)
@@ -120,7 +151,29 @@ class FNO2D(nn.Module):
         # Extract last known PM2.5 state for residual connection
         last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2) 
         
-        x_in = x.permute(0, 3, 1, 2)
+        # Slice X into components
+        c0 = self.time_input
+        c1 = c0 + self.total_time * self.num_temporal_features
+        
+        pm = x[..., :c0]
+        temporal = x[..., c0:c1]
+        static_topo = x[..., c1:]
+        
+        # Process temporal through TemporalEncoder
+        # temporal shape: (b, nx, ny, total_time * num_temporal_features)
+        # where we know the inner dimension is grouped by time * features 
+        # specifically it was: (H, W, time, features) flattened, thus (total_time, num_temporal_features)
+        temporal = temporal.reshape(b, nx, ny, self.total_time, self.num_temporal_features)
+        # (b * nx * ny, num_temporal_features, total_time) for Conv1d
+        temporal_flat = temporal.permute(0, 1, 2, 4, 3).reshape(-1, self.num_temporal_features, self.total_time)
+        
+        temporal_encoded = self.temporal_encoder(temporal_flat) # (b * nx * ny, 32)
+        temporal_encoded = temporal_encoded.reshape(b, nx, ny, 32)
+        
+        # Re-concatenate
+        x_new = torch.cat([pm, temporal_encoded, static_topo], dim=-1)
+        
+        x_in = x_new.permute(0, 3, 1, 2)
         grid = self.get_grid(b, nx, ny, x.device) 
         x_in = torch.cat([x_in, grid], dim=1) 
         

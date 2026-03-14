@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +16,12 @@ from torch.optim.swa_utils import AveragedModel, SWALR
 # 1. SETUP & CONFIGURATION
 # ==========================================
 cfg = load_config("configs/train.yaml")
+
+logging.basicConfig(
+    filename=getattr(cfg.paths, 'log_path', 'training.log'),
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(0)
@@ -125,7 +132,9 @@ model = FNO2D(
     time_out=cfg.data.time_out, 
     width=cfg.model.width, 
     modes=cfg.model.modes,
-    time_input=cfg.data.time_input
+    time_input=cfg.data.time_input,
+    total_time=cfg.data.total_time,
+    num_temporal_features=10  # Based on the 10 dynamic features
 ).to(device)
 
 optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
@@ -217,14 +226,18 @@ for ep in range(cfg.training.epochs):
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
     
     duration = time.time() - t_start
-    print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
+    msg = f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}"
+    print(msg)
+    logging.info(msg)
 
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
         if cfg.training.save_checkpoint:
             # Save the currently evaluating model's dict (which will be SWA if active)
             torch.save({'model_state_dict': eval_model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
-        print(f"  -> New Best Val RMSE: {best_val_rmse:.4f}")
+        best_msg = f"  -> New Best Val RMSE: {best_val_rmse:.4f}"
+        print(best_msg)
+        logging.info(best_msg)
 
     log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})
     with open(cfg.paths.save_dir, 'w') as f: json.dump(log, f)

@@ -38,14 +38,26 @@ def load_raw_or_derived(feat, month):
         return arr
 
 def compute_gridwise_robust_stats(features, months):
-    print("Calculating Grid-Wise Robust Statistics...")
+    print("Calculating Grid-Wise Robust Statistics (Train Only)...")
     stats = {}
+    cycle_size = (12 * 24) + (3 * 24)
+    train_len = 12 * 24
+
     for feat in tqdm(features, desc="Scanning features"):
-        feat_data = [load_raw_or_derived(feat, month) for month in months]
-        feat_data = np.concatenate(feat_data, axis=0)
+        feat_data_train = []
+        for month in months:
+            arr = load_raw_or_derived(feat, month)
+            total_hours = arr.shape[0]
+            mask = np.zeros(total_hours, dtype=bool)
+            for start_idx in range(0, total_hours, cycle_size):
+                end_train = min(start_idx + train_len, total_hours)
+                mask[start_idx:end_train] = True
+            feat_data_train.append(arr[mask])
+            
+        feat_data_train = np.concatenate(feat_data_train, axis=0)
         
-        median = np.median(feat_data, axis=0)
-        q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
+        median = np.median(feat_data_train, axis=0)
+        q75, q25 = np.percentile(feat_data_train, [75, 25], axis=0)
         iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
         
         stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32)}
@@ -56,10 +68,24 @@ def compute_gridwise_robust_stats(features, months):
 global_stats = compute_gridwise_robust_stats(all_features, cfg.data.months)
 
 # Generate Topography from PSFC (Loaded explicitly just for this)
-print("Generating Topography Map...")
-all_psfc = np.concatenate([np.load(os.path.join(RAW_PATH, m, "psfc.npy")).astype(np.float32) for m in cfg.data.months], axis=0)
-psfc_median = np.median(all_psfc, axis=0)
+print("Generating Topography Map (Train Only)...")
+psfc_train = []
+cycle_size = (12 * 24) + (3 * 24)
+train_len = 12 * 24
+
+for m in cfg.data.months:
+    arr = np.load(os.path.join(RAW_PATH, m, "psfc.npy")).astype(np.float32)
+    total_hours = arr.shape[0]
+    mask = np.zeros(total_hours, dtype=bool)
+    for start_idx in range(0, total_hours, cycle_size):
+        end_train = min(start_idx + train_len, total_hours)
+        mask[start_idx:end_train] = True
+    psfc_train.append(arr[mask])
+
+all_psfc_train = np.concatenate(psfc_train, axis=0)
+psfc_median = np.median(all_psfc_train, axis=0)
 topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
+np.save(os.path.join(os.path.dirname(cfg.paths.stats_path), "topo_proxy.npy"), topo_proxy)
 
 def process_month(month_name):
     month_data = []
