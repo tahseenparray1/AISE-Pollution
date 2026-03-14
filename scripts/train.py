@@ -241,7 +241,7 @@ swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
 best_val_rmse = float('inf')
 log = []
 use_amp = (device.type == 'cuda')
-scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
 for ep in range(cfg.training.epochs):
     model.train()
