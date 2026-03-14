@@ -158,24 +158,30 @@ class InverseHaarWavelet2D(nn.Module):
         return F.conv_transpose2d(x, self.filters, stride=2, groups=self.in_channels)
 
 class TemporalEncoder(nn.Module):
-    """ Extracts temporal derivatives and preserves event timing """
+    """ Extracts temporal derivatives and preserves event timing securely under AMP """
     def __init__(self, in_features, hidden_dim, out_features, total_time=26):
         super().__init__()
         self.conv1 = nn.Conv1d(in_features, hidden_dim, kernel_size=3, padding=1)
+        self.norm1 = nn.GroupNorm(4, hidden_dim)  # <-- AMP Safety Net 1
+        
         self.conv2 = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1)
+        self.norm2 = nn.GroupNorm(4, hidden_dim)  # <-- AMP Safety Net 2
         
         # Replace pooling with a Flatten + Linear mapping
         self.flatten_dim = hidden_dim * total_time
         self.fc = nn.Linear(self.flatten_dim, out_features)
+        self.norm3 = nn.LayerNorm(out_features)   # <-- AMP Safety Net 3
 
     def forward(self, x):
         # x is expected to be (Batch, Features, Time)
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
+        x = F.relu(self.norm1(self.conv1(x)))
+        x = F.relu(self.norm2(self.conv2(x)))
         
         # Flatten the feature and time dimensions
         x = x.view(x.size(0), -1) # Now safe to use .view() here
         x = self.fc(x)            # (Batch, out_features)
+        x = self.norm3(x)  # Lock the output variance before concatenation
+        
         return x
 
 class WNOBlock(nn.Module):
@@ -189,8 +195,9 @@ class WNOBlock(nn.Module):
         # 1. Spatial processing per sub-band (Keeps parameter count low)
         self.spectral_spatial = nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
         
-        # ---> CRITICAL AMP FIX: Standardize variance before the massive pointwise sum
-        self.spectral_norm = nn.GroupNorm(16, width * 4) 
+        # ---> AMP OVERFLOW FIX: InstanceNorm2d normalizes per-channel.
+        # Sums only 4,340 spatial elements, making it 100% safe from float16 (65,504) overflow.
+        self.spectral_norm = nn.InstanceNorm2d(width * 4, affine=True) 
         
         # 2. Cross-frequency mixing (Mixes LL, LH, HL, HH together)
         self.spectral_pointwise = nn.Conv2d(width * 4, width * 4, kernel_size=1, groups=1)

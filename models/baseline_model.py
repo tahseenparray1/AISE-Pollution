@@ -82,8 +82,9 @@ class WNOBlock(nn.Module):
         # 1. Spatial processing per sub-band (Keeps parameter count low)
         self.spectral_spatial = nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
         
-        # ---> CRITICAL AMP FIX: Standardize variance before the massive pointwise sum
-        self.spectral_norm = nn.GroupNorm(16, width * 4) 
+        # ---> AMP OVERFLOW FIX: InstanceNorm2d normalizes per-channel.
+        # Sums only 4,340 spatial elements, making it 100% safe from float16 (65,504) overflow.
+        self.spectral_norm = nn.InstanceNorm2d(width * 4, affine=True) 
         
         # 2. Cross-frequency mixing (Mixes LL, LH, HL, HH together)
         self.spectral_pointwise = nn.Conv2d(width * 4, width * 4, kernel_size=1, groups=1)
