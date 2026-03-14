@@ -10,7 +10,6 @@ paths:
 
 data:
   dataset: test_in
-  ntest: 996
   time_input: 10
   time_out: 16
   total_time: 26

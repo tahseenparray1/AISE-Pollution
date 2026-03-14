@@ -113,14 +113,18 @@ class TestDataLoader(torch.utils.data.Dataset):
         temporal_stack = np.stack(temporal_feats, axis=0)
         temporal_tensor = torch.from_numpy(temporal_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
         
-        # Static: Stack -> Mean across time -> (Channels, Time, H, W) -> (Channels, H, W) -> (H, W, Channels)
+        # Static: Stack -> [min, mean, max] across time 
         static_stack = np.stack(static_feats, axis=0)
-        static_tensor = torch.from_numpy(static_stack).mean(dim=1).permute(1, 2, 0)
+        static_tensor_raw = torch.from_numpy(static_stack)
+        static_tensor_min = static_tensor_raw.min(dim=1)[0].permute(1, 2, 0)
+        static_tensor_mean = static_tensor_raw.mean(dim=1).permute(1, 2, 0)
+        static_tensor_max = static_tensor_raw.max(dim=1)[0].permute(1, 2, 0)
+        static_tensor = torch.cat([static_tensor_min, static_tensor_mean, static_tensor_max], dim=-1)
         
         # Topo
-        topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
+        topo_tensor = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
         
-        # Combine (10 + 260 + 7 + 1 = 278 Channels)
+        # Combine everything (10 + 260 + 21 + 1 = 292 Channels)
         x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
 
         return x
@@ -132,8 +136,9 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # 3. MODEL INITIALIZATION
 # ==========================================
 pm_channels = cfg_train.data.time_input
-temporal_channels = 10 * cfg_train.data.total_time 
-static_channels = 7 
+temporal_features_count = len([f for f in cfg_train.features.met_variables if f != 'cpm25'] + cfg_train.features.derived_variables)
+temporal_channels = temporal_features_count * cfg_train.data.total_time 
+static_channels = len(cfg_train.features.emission_variables) * 3
 topo_channels = 1
 
 in_channels = pm_channels + temporal_channels + static_channels + topo_channels
@@ -146,10 +151,10 @@ model = FNO2D(
     modes=cfg_train.model.modes,
     time_input=cfg_train.data.time_input,
     total_time=cfg_train.data.total_time,
-    num_temporal_features=10
+    num_temporal_features=temporal_features_count
 ).to(device)
 
-checkpoint_path = cfg_train.paths.model_save_path.replace(".pt", "_best.pt")
+checkpoint_path = cfg_infer.paths.checkpoint
 print(f"Loading best weights from: {checkpoint_path}")
 checkpoint = torch.load(checkpoint_path, map_location=device)
 

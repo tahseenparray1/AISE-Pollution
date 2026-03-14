@@ -58,7 +58,11 @@ def compute_gridwise_robust_stats(features, months):
         
         median = np.median(feat_data_train, axis=0)
         q75, q25 = np.percentile(feat_data_train, [75, 25], axis=0)
-        iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
+        
+        if feat == 'rain_mask':
+            iqr = np.clip(q75 - q25, a_min=1e-5, a_max=None)
+        else:
+            iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
         
         stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32)}
         
@@ -95,8 +99,8 @@ def process_month(month_name):
         month_data.append(arr)
 
     total_hours = month_data[0].shape[0] 
-    topo_time = np.broadcast_to(topo_proxy[None, :, :], (total_hours, 140, 124))
-    month_data.append(topo_time)
+    # Topo proxy is no longer embedded here to prevent memory bloat.
+    # It is loaded directly by the Dataloader now.
 
     combined = np.stack(month_data, axis=-1)
 

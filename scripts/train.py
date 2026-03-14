@@ -61,21 +61,22 @@ def skewed_mse_loss(pred_phys, target_phys, threshold=100.0, alpha=0.05, max_pen
     """
     mse = (pred_phys - target_phys) ** 2
     
+    weights = torch.ones_like(target_phys)
+    
     # Identify under-predictions strictly on hotspots
     under_mask = (target_phys > threshold) & (pred_phys < target_phys)
     
     if under_mask.any():
         error = target_phys[under_mask] - pred_phys[under_mask]
-        # Calculate exponential penalty multiplier, clamped to prevent NaN gradients (e.g. max_penalty 5.0 -> max 148x weight)
+        # Calculate exponential penalty multiplier, clamped to prevent NaN gradients
         penalty_weight = torch.exp(torch.clamp(alpha * error, max=max_penalty))
         
-        weights = torch.ones_like(target_phys)
         weights[under_mask] = penalty_weight
-        return torch.mean(weights * mse)
-    
-    return torch.mean(mse)
+        
+    # ALWAYS return the weighted calculation so scaling is identical
+    return torch.sum(weights * mse) / torch.sum(weights)
 
-def log_layer_dynamics(model, epoch):
+def log_layer_dynamics(model, epoch, grad_acc=None, num_steps=1):
     """ Logs the average absolute weight and gradient magnitude of major network blocks """
     logging.info(f"--- Epoch {epoch} Layer Dynamics (Mean L1 Norm) ---")
     
@@ -95,7 +96,9 @@ def log_layer_dynamics(model, epoch):
         for name, param in model.named_parameters():
             if name.startswith(prefix) and param.requires_grad:
                 weight_sum += param.abs().mean().item()
-                if param.grad is not None:
+                if grad_acc is not None and name in grad_acc:
+                    grad_sum += grad_acc[name] / max(1, num_steps)
+                elif param.grad is not None:
                     grad_sum += param.grad.abs().mean().item()
                 count += 1
                 
@@ -138,8 +141,9 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # Static emission feature indices
         self.static_idx = [i for i, f in enumerate(all_features) 
                           if f in cfg.features.emission_variables]
-        # Topography is the last channel appended in prepare_dataset.py
-        self.topo_idx = len(all_features)
+        # Topography is no longer embedded in train_data to prevent bloat.
+        topo_path = cfg.paths.topo_path
+        self.topo_proxy = np.load(topo_path)
 
     def __len__(self): 
         return len(self.valid_starts)
@@ -155,13 +159,18 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         temporal_weather = window[:, ..., self.temporal_idx]
         temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
         
-        # 3. Static Emissions (Mean across the 26 hours to collapse to 7 spatial channels)
-        static_emissions = window[:, ..., self.static_idx].mean(dim=0)
+        # 3. Static Emissions (Extract [min, mean, max] along the time dimension to preserve daily profile)
+        static_emissions_raw = window[:, ..., self.static_idx]
+        static_emissions = torch.cat([
+            static_emissions_raw.min(dim=0)[0],
+            static_emissions_raw.mean(dim=0),
+            static_emissions_raw.max(dim=0)[0]
+        ], dim=-1)
         
         # 4. Static Topography (1 channel)
-        topo = window[0, ..., self.topo_idx].unsqueeze(-1)
+        topo = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
         
-        # Combine everything (10 + 260 + 7 + 1 = 278 Channels)
+        # Combine everything (10 + 260 + 21 + 1 = 292 Channels)
         x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
         
         # Target (uses same config-driven index as input)
@@ -178,8 +187,9 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # 4. MODEL & OPTIMIZER
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time # 10 dynamic features
-static_channels = 7 # 7 emission proxy maps
+temporal_features_count = len([f for f in cfg.features.met_variables if f != 'cpm25'] + cfg.features.derived_variables)
+temporal_channels = temporal_features_count * cfg.data.total_time
+static_channels = len(cfg.features.emission_variables) * 3
 topo_channels = 1
 
 in_channels = pm_channels + temporal_channels + static_channels + topo_channels
@@ -192,7 +202,7 @@ model = FNO2D(
     modes=cfg.model.modes,
     time_input=cfg.data.time_input,
     total_time=cfg.data.total_time,
-    num_temporal_features=10  # Based on the 10 dynamic features
+    num_temporal_features=temporal_features_count
 ).to(device)
 
 def log_model_summary(model):
@@ -230,12 +240,15 @@ swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
 # ==========================================
 best_val_rmse = float('inf')
 log = []
+use_amp = (device.type == 'cuda')
+scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
 for ep in range(cfg.training.epochs):
     model.train()
     t_start = time.time()
     train_mse_acc = 0.0
     grad_ratio_acc = 0.0
+    grad_acc = {name: 0.0 for name, p in model.named_parameters() if p.requires_grad}
     
     current_lr = optimizer.param_groups[0]['lr']
     logging.info(f"--- Starting Epoch {ep} | LR: {current_lr:.6f} ---")
@@ -246,34 +259,49 @@ for ep in range(cfg.training.epochs):
         
         # FIX #2: Apply noise only to continuous features, protecting:
         # - Topography (last channel): static elevation proxy from PSFC
-        # - Rain mask (binary 0/1): within temporal channels
+        c0 = cfg.data.time_input
+        c1 = c0 + (cfg.data.total_time * temporal_features_count)
+
         noise = torch.randn_like(x) * 0.01
-        noise[..., -1] = 0.0  # Zero out noise for topography (last channel)
+        noise[..., -1] = 0.0  # Protect topography
+
+        # Protect ONLY the binary rain_mask
+        rain_mask_name = 'rain_mask'
+        all_features = cfg.features.met_variables + cfg.features.emission_variables + cfg.features.derived_variables
+        temporal_vars = [f for f in all_features if f != 'cpm25' and f not in cfg.features.emission_variables]
+        if rain_mask_name in temporal_vars:
+            rm_idx = temporal_vars.index(rain_mask_name)
+            rain_mask_indices = torch.arange(c0 + rm_idx, c1, temporal_features_count)
+            noise[..., rain_mask_indices] = 0.0
+            
         x = x + noise
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Single Forward Pass (Direct Multi-Step)
-        out = model(x)
-        
-        pred_phys = to_physical(out)
-        targ_phys = to_physical(y)
-        
-        # --- NEW LOSS FORMULATION ---
-        # 1. Skewed MSE (Exponentially penalizes hotspot under-predictions instead of smoothing them)
-        skewed_loss = skewed_mse_loss(pred_phys, targ_phys, threshold=100.0, alpha=0.05)
-        
-        # 2. Spatial Gradient Loss (Keeps plume edges sharp)
-        loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-        
-        # 3. Blended Total Loss
-        total_loss = skewed_loss + 0.1 * loss_grad
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            # Single Forward Pass (Direct Multi-Step)
+            out = model(x)
+            
+            pred_phys = to_physical(out)
+            targ_phys = to_physical(y)
+            
+            # --- NEW LOSS FORMULATION ---
+            # 1. Skewed MSE (Exponentially penalizes hotspot under-predictions instead of smoothing them)
+            skewed_loss = skewed_mse_loss(pred_phys, targ_phys, threshold=100.0, alpha=0.05)
+            
+            # 2. Spatial Gradient Loss (Keeps plume edges sharp)
+            loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+            
+            # 3. Blended Total Loss
+            total_loss = skewed_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
-        total_loss.backward()
+            
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
         
         # Gradient Flow Ratio Check
         grad_out = model.fc2.weight.grad.abs().mean().item() if (model.fc2.weight.grad is not None) else 0.0
@@ -281,7 +309,13 @@ for ep in range(cfg.training.epochs):
         grad_ratio_acc += grad_in / (grad_out + 1e-8)
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
+        
+        # Accumulate gradients continuously for layer dynamics logging
+        for name, param in model.named_parameters():
+            if param.requires_grad and param.grad is not None:
+                grad_acc[name] += param.grad.abs().mean().item()
         
         step_duration = time.time() - step_start
         if step % 20 == 0:
@@ -297,8 +331,8 @@ for ep in range(cfg.training.epochs):
             logging.info(log_msg)
 
     # --- NEW: LOG LAYER DYNAMICS ---
-    # Captures the state of the network weights and gradients right after the last training batch
-    log_layer_dynamics(model, ep)
+    # Captures the state of the network weights and gradients across the whole epoch
+    log_layer_dynamics(model, ep, grad_acc=grad_acc, num_steps=len(train_loader))
 
     # --- NEW: SWA SCHEDULER STEP ---
     if ep >= swa_start:

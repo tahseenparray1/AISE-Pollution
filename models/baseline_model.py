@@ -73,8 +73,11 @@ class WNOBlock(nn.Module):
         self.dwt = HaarWavelet2D(width)
         self.idwt = InverseHaarWavelet2D(width)
         
-        # Mixes the 4 wavelet sub-bands (LL, LH, HL, HH)
-        self.spectral_mixer = nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
+        # 1. Spatial processing per sub-band (Keeps parameter count low)
+        self.spectral_spatial = nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1, groups=4)
+        
+        # 2. Cross-frequency mixing (Mixes LL, LH, HL, HH together)
+        self.spectral_pointwise = nn.Conv2d(width * 4, width * 4, kernel_size=1, groups=1)
         
         # FIX #4: Depthwise conv with large kernel to expand receptive field
         # Enables modeling long-range wind advection across the 140x124 spatial grid
@@ -89,8 +92,9 @@ class WNOBlock(nn.Module):
         # 1. Decompose to Wavelet domain
         x_w = self.dwt(x_norm)
         
-        # 2. Mix frequencies
-        x_w = self.spectral_mixer(x_w)
+        # 2. Mix frequencies (Spatial then Pointwise)
+        x_w = self.spectral_spatial(x_w)
+        x_w = self.spectral_pointwise(x_w)
         
         # 3. Reconstruct back to Spatial domain
         out_w = self.idwt(x_w)
@@ -161,8 +165,8 @@ class FNO2D(nn.Module):
         
         # Process temporal through TemporalEncoder
         # temporal shape: (b, nx, ny, total_time * num_temporal_features)
-        # where we know the inner dimension is grouped by time * features 
-        # specifically it was: (H, W, time, features) flattened, thus (total_time, num_temporal_features)
+        assert temporal.shape[-1] == self.total_time * self.num_temporal_features, "Incoming temporal channels do not match config!"
+        
         temporal = temporal.reshape(b, nx, ny, self.total_time, self.num_temporal_features)
         # (b * nx * ny, num_temporal_features, total_time) for Conv1d
         temporal_flat = temporal.permute(0, 1, 2, 4, 3).reshape(-1, self.num_temporal_features, self.total_time)
