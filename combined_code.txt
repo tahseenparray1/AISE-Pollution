@@ -92,11 +92,11 @@ data:
   stride: 4
 
 features:
-  V: 19 # 1 PM2.5 + 7 met + 7 emi + 4 derived
+  V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
   met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"] # psfc removed
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-  derived_variables: ["wind_speed", "vent_coef", "rain_mask", "wind_convergence"]
+  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
 
 model:
   modes: 8
@@ -132,11 +132,11 @@ data:
   stride: 4
 
 features:
-  V: 19 # 1 PM2.5 + 7 met + 7 emi + 4 derived
+  V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
   met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"] # psfc removed
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-  derived_variables: ["wind_speed", "vent_coef", "rain_mask", "wind_convergence"]
+  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
 
 model:
   width: 256
@@ -381,18 +381,9 @@ class TestDataLoader(torch.utils.data.Dataset):
         vc = np.log1p(ws * seq_raw['pblh'])
         rm = (seq_raw['rain'] > 0).astype(np.float32)
         
-        # Calculate Kinematic Convergence
-        # Test input shape for met variables is (samples, 26, 140, 124)
-        # But here we are indexing a single sample, so seq_raw['u10'] is (26, 140, 124)
-        # We want gradients along axis 2 (lon/x) for u, and axis 1 (lat/y) for v
-        du_dx = np.gradient(seq_raw['u10'], axis=2)
-        dv_dy = np.gradient(seq_raw['v10'], axis=1)
-        conv = -(du_dx + dv_dy)
-        
         seq_raw['wind_speed'] = ws
         seq_raw['vent_coef'] = vc
         seq_raw['rain_mask'] = rm
-        seq_raw['wind_convergence'] = conv
         
         # 3. Apply Log Transforms
         skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh']
@@ -443,7 +434,7 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # 3. MODEL INITIALIZATION
 # ==========================================
 pm_channels = cfg_train.data.time_input
-temporal_channels = 11 * cfg_train.data.total_time 
+temporal_channels = 10 * cfg_train.data.total_time 
 static_channels = 7 
 topo_channels = 1
 
@@ -505,7 +496,7 @@ from src.utils.config import load_config
 cfg = load_config("configs/prepare_rapid.yaml")
 RAW_PATH = cfg.paths.raw_path
 
-derived_features = ['wind_speed', 'vent_coef', 'rain_mask', 'wind_convergence']
+derived_features = ['wind_speed', 'vent_coef', 'rain_mask']
 all_features = cfg.features.met_variables_raw + cfg.features.emission_variables_raw + derived_features
 
 def load_raw_or_derived(feat, month):
@@ -525,27 +516,6 @@ def load_raw_or_derived(feat, month):
     elif feat == 'rain_mask':
         rain = np.load(os.path.join(RAW_PATH, month, "rain.npy")).astype(np.float32)
         return (rain > 0).astype(np.float32)
-        
-    elif feat == 'wind_convergence':
-        # Kinematic Convergence = -(du/dx + dv/dy)
-        # We need to compute spatial gradients for each timestep.
-        # Data shape: (T, 140, 124). Spatial dims are axis 1 (y/lat) and axis 2 (x/lon).
-        # We assume uniform grid spacing, so we just use the raw differences.
-        
-        u = np.load(os.path.join(RAW_PATH, month, "u10.npy")).astype(np.float32)
-        v = np.load(os.path.join(RAW_PATH, month, "v10.npy")).astype(np.float32)
-        
-        # np.gradient computes central differences: returns a list [dt, dy, dx]
-        # v10 is meridional (y-direction wind) -> we want dv/dy (axis 1)
-        # u10 is zonal (x-direction wind) -> we want du/dx (axis 2)
-        
-        # We don't care about the time gradient (axis 0), so we only ask for axes 1 and 2
-        # However, it's easier to just compute it across all axes and take what we need
-        du_dx = np.gradient(u, axis=2)
-        dv_dy = np.gradient(v, axis=1)
-        
-        convergence = -(du_dx + dv_dy)
-        return convergence
         
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
@@ -751,7 +721,7 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # ==========================================
 # 4. MODEL & OPTIMIZER
 # ==========================================
-temporal_channels = 11 * cfg.data.total_time # 11 dynamic features
+temporal_channels = 10 * cfg.data.total_time # 10 dynamic features
 topo_channels = 1
 
 in_channels = pm_channels + temporal_channels + static_channels + topo_channels
@@ -968,7 +938,7 @@ print(f"Rapid Dataset: {len(train_ds)} train samples, {len(val_ds)} val samples"
 # 4. MODEL & OPTIMIZER (No SWA)
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 11 * cfg.data.total_time
+temporal_channels = 10 * cfg.data.total_time
 static_channels = 7
 topo_channels = 1
 
@@ -1119,7 +1089,7 @@ print(f"Rapid Dataset: {len(train_ds)} train samples, {len(val_ds)} val samples"
 # 4. MODEL & OPTIMIZER (No SWA)
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 11 * cfg.data.total_time
+temporal_channels = 10 * cfg.data.total_time
 static_channels = 7
 topo_channels = 1
 

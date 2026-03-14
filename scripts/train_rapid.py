@@ -141,9 +141,19 @@ for ep in range(cfg.training.epochs):
         pred_phys = to_physical(out)
         targ_phys = to_physical(y)
         
-        mse_loss = F.mse_loss(pred_phys, targ_phys)
+        # --- NEW: CONCENTRATION-WEIGHTED MSE ---
+        # 1. Calculate raw squared errors element-wise
+        raw_sq_error = (pred_phys - targ_phys) ** 2
+        
+        # 2. Create dynamic weight: Base weight is 1.0 for PM2.5 <= 50.
+        # Scales linearly for higher values (e.g., PM2.5 of 100 -> weight 2.0)
+        weight_mask = torch.clamp(targ_phys / 50.0, min=1.0)
+        
+        # 3. Apply weight and take the mean
+        weighted_mse = torch.mean(raw_sq_error * weight_mask)
+        
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-        total_loss = mse_loss + 0.1 * loss_grad
+        total_loss = weighted_mse + 0.1 * loss_grad
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
