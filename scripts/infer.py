@@ -84,7 +84,13 @@ class TestDataLoader(torch.utils.data.Dataset):
         seq_raw['vent_coef'] = vc
         seq_raw['rain_mask'] = rm
         
-        # 3. Apply Log Transforms (Weather only!)
+        # 3. Apply Log Transforms
+        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+        for feat in emi_vars:
+            if feat in seq_raw:
+                # Apply the EXACT same 1e11 scale + log1p
+                seq_raw[feat] = np.log1p(seq_raw[feat] * 1e11)
+                
         skewed_features = ['rain', 'pblh']
         for feat in skewed_features:
             if feat in seq_raw:

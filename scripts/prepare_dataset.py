@@ -30,7 +30,14 @@ def load_raw_or_derived(feat, month):
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         
-        # Only log-transform the skewed weather features, leave emissions raw!
+        # --- THE TELESCOPE SCALER ---
+        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+        if feat in emi_vars:
+            arr = arr * 1e11  # Bring the median up to ~1.0
+            arr = np.log1p(arr) # Compress the 6000x outliers
+            return arr
+            
+        # Non-emission skewed features
         if feat in ['rain', 'pblh']: 
             arr = np.log1p(arr)
             
