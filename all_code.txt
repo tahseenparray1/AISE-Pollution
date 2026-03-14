@@ -952,18 +952,21 @@ for ep in range(cfg.training.epochs):
             # Single Forward Pass (Direct Multi-Step)
             out = model(x)
             
-            pred_phys = to_physical(out)
-            targ_phys = to_physical(y)
-            
-            # --- NEW LOSS FORMULATION ---
-            # 1. Skewed MSE (Exponentially penalizes hotspot under-predictions instead of smoothing them)
-            skewed_loss = skewed_mse_loss(pred_phys, targ_phys, threshold=100.0, alpha=0.05)
-            
-            # 2. Spatial Gradient Loss (Keeps plume edges sharp)
-            loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-            
-            # 3. Blended Total Loss
-            total_loss = skewed_loss + 0.1 * loss_grad
+        # EXIT AUTOCAST: Convert to float32 to prevent MSE from overflowing float16
+        out_f32 = out.float()
+        
+        pred_phys = to_physical(out_f32)
+        targ_phys = to_physical(y.float())
+        
+        # --- NEW LOSS FORMULATION ---
+        # 1. Skewed MSE (Exponentially penalizes hotspot under-predictions instead of smoothing them)
+        skewed_loss = skewed_mse_loss(pred_phys, targ_phys, threshold=100.0, alpha=0.05)
+        
+        # 2. Spatial Gradient Loss (Keeps plume edges sharp)
+        loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+        
+        # 3. Blended Total Loss
+        total_loss = skewed_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
