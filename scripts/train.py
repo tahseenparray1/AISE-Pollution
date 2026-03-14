@@ -213,6 +213,7 @@ for ep in range(cfg.training.epochs):
     model.train()
     t_start = time.time()
     train_mse_acc = 0.0
+    grad_ratio_acc = 0.0
     
     current_lr = optimizer.param_groups[0]['lr']
     logging.info(f"--- Starting Epoch {ep} | LR: {current_lr:.6f} ---")
@@ -252,6 +253,11 @@ for ep in range(cfg.training.epochs):
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
         total_loss.backward()
         
+        # Gradient Flow Ratio Check
+        grad_out = model.fc2.weight.grad.abs().mean().item() if (model.fc2.weight.grad is not None) else 0.0
+        grad_in = model.input_encoder[0].weight.grad.abs().mean().item() if (model.input_encoder[0].weight.grad is not None) else 0.0
+        grad_ratio_acc += grad_in / (grad_out + 1e-8)
+        
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         
@@ -289,6 +295,11 @@ for ep in range(cfg.training.epochs):
     val_low_pm_mse_acc = 0.0
     high_pm_count = 0
     low_pm_count = 0
+    
+    val_huber_acc, val_grad_acc = 0.0, 0.0
+    val_t1_mse_acc, val_t8_mse_acc, val_t16_mse_acc = 0.0, 0.0, 0.0
+    val_igp_mse_acc, val_ocean_mse_acc = 0.0, 0.0
+    val_max_pred, val_max_targ = 0.0, 0.0
 
     with torch.no_grad():
         for x, y in val_loader:
@@ -305,6 +316,23 @@ for ep in range(cfg.training.epochs):
             
             # Global Validation Step
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
+            
+            # Additive Loss Components
+            val_huber_acc += F.huber_loss(pred_phys, targ_phys, delta=10.0).item()
+            val_grad_acc += spatial_gradient_loss(pred_phys, targ_phys).item()
+            
+            # Forecast Horizon Degradation
+            val_t1_mse_acc += torch.mean((pred_phys_clipped[..., 0] - targ_phys[..., 0]) ** 2).item()
+            val_t8_mse_acc += torch.mean((pred_phys_clipped[..., 7] - targ_phys[..., 7]) ** 2).item()
+            val_t16_mse_acc += torch.mean((pred_phys_clipped[..., 15] - targ_phys[..., 15]) ** 2).item()
+            
+            # Regional Stratification
+            val_igp_mse_acc += torch.mean((pred_phys_clipped[:, 60:90, 40:100, :] - targ_phys[:, 60:90, 40:100, :]) ** 2).item()
+            val_ocean_mse_acc += torch.mean((pred_phys_clipped[:, 0:30, 0:50, :] - targ_phys[:, 0:30, 0:50, :]) ** 2).item()
+            
+            # Peak Capture
+            val_max_pred = max(val_max_pred, pred_phys.max().item())
+            val_max_targ = max(val_max_targ, targ_phys.max().item())
             
             # Data Specific Analysis Step (Extreme Spikes vs Clear Conditions)
             # Define high pollution threshold > 100 ug/m3, Low pollution < 30 ug/m3
@@ -325,10 +353,27 @@ for ep in range(cfg.training.epochs):
     val_high_rmse = np.sqrt(val_high_pm_mse_acc / max(1, high_pm_count))
     val_low_rmse = np.sqrt(val_low_pm_mse_acc / max(1, low_pm_count))
     
+    val_t1_rmse = np.sqrt(val_t1_mse_acc / len(val_loader))
+    val_t8_rmse = np.sqrt(val_t8_mse_acc / len(val_loader))
+    val_t16_rmse = np.sqrt(val_t16_mse_acc / len(val_loader))
+    val_igp_rmse = np.sqrt(val_igp_mse_acc / len(val_loader))
+    val_ocean_rmse = np.sqrt(val_ocean_mse_acc / len(val_loader))
+    
     duration = time.time() - t_start
     msg = (f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | "
            f"Val RMSE: {val_rmse:.4f} | High PM Val RMSE: {val_high_rmse:.4f} | Low PM Val RMSE: {val_low_rmse:.4f}")
     logging.info(msg)
+    
+    peak_capture = val_max_pred / (val_max_targ + 1e-5)
+    grad_ratio_avg = grad_ratio_acc / len(train_loader)
+    
+    logging.info(f"--- Epoch {ep} Advanced Telemetry ---")
+    logging.info(f" [When]  T+1 RMSE: {val_t1_rmse:.4f} | T+8 RMSE: {val_t8_rmse:.4f} | T+16 RMSE: {val_t16_rmse:.4f}")
+    logging.info(f" [Where] IGP RMSE: {val_igp_rmse:.4f} | Ocean RMSE: {val_ocean_rmse:.4f}")
+    logging.info(f" [Physics] Peak Capture Ratio: {peak_capture:.4f} (Pred Max: {val_max_pred:.1f} / Actual Max: {val_max_targ:.1f})")
+    logging.info(f" [Arch] Gradient Flow Ratio (In/Out): {grad_ratio_avg:.6f}")
+    logging.info(f" [Loss] Val Huber: {(val_huber_acc / len(val_loader)):.4f} | Val Grad: {(val_grad_acc / len(val_loader)):.4f}")
+    logging.info("-------------------------------------")
 
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
