@@ -57,7 +57,7 @@ class WNOBlock(nn.Module):
         
         # FIX #4: Depthwise conv with large kernel to expand receptive field
         # Enables modeling long-range wind advection across the 140x124 spatial grid
-       self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=4, dilation=2, groups=width)
+        self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=4, dilation=2, groups=width)
         self.pointwise = nn.Conv2d(width, width, 1)
         self.norm = nn.GroupNorm(4, width)
 
