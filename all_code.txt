@@ -727,28 +727,31 @@ def spatial_gradient_loss(pred_phys, target_phys):
     dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
     return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
 
-def skewed_mse_loss(pred_phys, target_phys, threshold=100.0, alpha=0.05, max_penalty=5.0):
+def skewed_mse_loss(pred_norm, targ_norm, pred_phys, targ_phys, threshold=100.0, alpha=0.05, max_penalty=2.0):
     """
-    Custom MSE that exponentially penalizes under-predictions on high-pollution days.
-    If the target is a hotspot (>100) and the model under-predicts, the MSE is scaled 
-    exponentially by the error magnitude, bounded to prevent exploding gradients.
+    Calculates weighted MSE in NORMALIZED space to prevent gradient explosions, 
+    but uses PHYSICAL space to identify the >100 ug/m3 hotspots.
     """
-    mse = (pred_phys - target_phys) ** 2
+    # Fix 1: Calculate MSE on normalized space
+    mse = (pred_norm - targ_norm) ** 2
     
-    weights = torch.ones_like(target_phys)
+    weights = torch.ones_like(targ_norm)
     
-    # Identify under-predictions strictly on hotspots
-    under_mask = (target_phys > threshold) & (pred_phys < target_phys)
+    # Identify under-predictions using physical values
+    under_mask = (targ_phys > threshold) & (pred_phys < targ_phys)
     
     if under_mask.any():
-        error = target_phys[under_mask] - pred_phys[under_mask]
-        # Calculate exponential penalty multiplier, clamped to prevent NaN gradients
-        penalty_weight = torch.exp(torch.clamp(alpha * error, max=max_penalty))
+        error_phys = targ_phys[under_mask] - pred_phys[under_mask]
         
+        # Fix 3: max_penalty=2.0 limits the exponential weight to ~7.4x
+        penalty_weight = torch.exp(torch.clamp(alpha * error_phys, max=max_penalty))
         weights[under_mask] = penalty_weight
         
-    # ALWAYS return the weighted calculation so scaling is identical
-    return torch.sum(weights * mse) / torch.sum(weights)
+    # Fix 2: Normalize weights to sum to 1 BEFORE multiplying by MSE. 
+    # This keeps the float32 accumulator extremely small and completely avoids sum overflows.
+    weights = weights / weights.sum()
+    
+    return torch.sum(weights * mse)
 
 def log_layer_dynamics(model, epoch, grad_acc=None, num_steps=1):
     """ Logs the average absolute weight and gradient magnitude of major network blocks """
@@ -958,16 +961,18 @@ for ep in range(cfg.training.epochs):
             
         # EXIT AUTOCAST: Convert to float32 to prevent MSE from overflowing float16
         out_f32 = out.float()
+        y_f32 = y.float()
         
+        # Calculate physical values strictly for the mask and logging
         pred_phys = to_physical(out_f32)
-        targ_phys = to_physical(y.float())
+        targ_phys = to_physical(y_f32)
         
-        # --- NEW LOSS FORMULATION ---
-        # 1. Skewed MSE (Exponentially penalizes hotspot under-predictions instead of smoothing them)
-        skewed_loss = skewed_mse_loss(pred_phys, targ_phys, threshold=100.0, alpha=0.05)
+        # --- REVISED LOSS FORMULATION ---
+        # We pass both normalized (for math) and physical (for masking)
+        skewed_loss = skewed_mse_loss(out_f32, y_f32, pred_phys, targ_phys, threshold=100.0, alpha=0.05, max_penalty=2.0)
         
-        # 2. Spatial Gradient Loss (Keeps plume edges sharp)
-        loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+        # Calculate gradient loss on normalized space as well
+        loss_grad = spatial_gradient_loss(out_f32, y_f32)
         
         # 3. Blended Total Loss
         total_loss = skewed_loss + 0.1 * loss_grad
@@ -1041,8 +1046,11 @@ for ep in range(cfg.training.epochs):
             # ✅ FIXED BUG: This must be eval_model, otherwise SWA does nothing!
             out = eval_model(x) 
             
-            pred_phys = to_physical(out)
-            targ_phys = to_physical(y)
+            out_f32 = out.float()
+            y_f32 = y.float()
+            
+            pred_phys = to_physical(out_f32)
+            targ_phys = to_physical(y_f32)
             
             # Apply ReLU to mimic the physical world constraint for our final score
             pred_phys_clipped = F.relu(pred_phys)
@@ -1050,9 +1058,9 @@ for ep in range(cfg.training.epochs):
             # Global Validation Step
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             
-            # Additive Loss Components
-            val_skewed_acc += skewed_mse_loss(pred_phys, targ_phys, threshold=100.0, alpha=0.05).item()
-            val_grad_acc += spatial_gradient_loss(pred_phys, targ_phys).item()
+            # Additive Loss Components - computed on normalized space!
+            val_skewed_acc += skewed_mse_loss(out_f32, y_f32, pred_phys, targ_phys, threshold=100.0, alpha=0.05, max_penalty=2.0).item()
+            val_grad_acc += spatial_gradient_loss(out_f32, y_f32).item()
             
             # Forecast Horizon Degradation
             val_t1_mse_acc += torch.mean((pred_phys_clipped[..., 0] - targ_phys[..., 0]) ** 2).item()
