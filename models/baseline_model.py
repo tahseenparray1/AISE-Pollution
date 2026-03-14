@@ -81,65 +81,96 @@ class WNOBlock(nn.Module):
         out = out_w + self.pointwise(x_norm)
         return x + F.gelu(out)
 
-class FNO2D(nn.Module):
-    # Renamed internal structure to WNO, kept class name FNO2D to prevent breaking your train.py imports!
-    def __init__(self, in_channels, time_out=16, width=64, modes=None, time_input=10):
+class WaveletUNet(nn.Module):
+    """
+    Topography-Conditioned Wavelet U-Net (W-UNet)
+    Replaces the flat FNO2D to increase receptive field, stop overfitting, and capture spikes.
+    """
+    def __init__(self, in_channels, time_out=16, width=128, time_input=10):
         super().__init__()
         self.width = width
         self.time_out = time_out
-        self.time_input = time_input  # Number of PM2.5 history hours (for residual connection)
+        self.time_input = time_input  
         
-        # Encode ablated input down to 'width'
-        # FIX #3: Use standard Dropout instead of Dropout2d to avoid
-        # dropping entire temporal channels (e.g. "Hour 5 Wind Speed")
-        self.input_encoder = nn.Sequential(
-            nn.Conv2d(in_channels + 2, width, kernel_size=1),
-            nn.GroupNorm(4, width),
-            nn.GELU(),
-            nn.Dropout(p=0.05)
+        # 1. Initial Encoder (Full Resolution: 140x124)
+        self.inc = nn.Sequential(
+            nn.Conv2d(in_channels + 2, width // 2, kernel_size=3, padding=1),
+            nn.GroupNorm(4, width // 2),
+            nn.GELU()
         )
         
-        # Stack WNO blocks instead of FNO blocks
-        self.block0 = WNOBlock(self.width)
-        self.block1 = WNOBlock(self.width)
-        self.block2 = WNOBlock(self.width)
-        self.block3 = WNOBlock(self.width)
+        # 2. Downsampling (Half Resolution: 70x62)
+        # Stride 2 reduces spatial dimensions, preventing overfitting and boosting receptive field
+        self.down = nn.Sequential(
+            nn.Conv2d(width // 2, width, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, width),
+            nn.GELU()
+        )
         
-        self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
-        self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1) 
+        # 3. WNO Bottleneck (Global Physics Transport at 70x62)
+        # Operates purely on the low-res spatial domain for global wind/advection
+        self.wno_blocks = nn.Sequential(
+            WNOBlock(width),
+            WNOBlock(width),
+            WNOBlock(width)
+        )
+        
+        # 4. Upsampling (Back to Full Resolution: 140x124)
+        self.up = nn.ConvTranspose2d(width, width // 2, kernel_size=2, stride=2)
+        
+        # 5. Decoder & Skip Connection Processing
+        self.dec = nn.Sequential(
+            nn.Conv2d(width, width // 2, kernel_size=3, padding=1), # width because of skip connection (width//2 + width//2)
+            nn.GroupNorm(4, width // 2),
+            nn.GELU(),
+            nn.Dropout(p=0.1) # Increased dropout to fight overfitting
+        )
+        
+        # 6. Final Projection to Delta Target
+        self.fc_out = nn.Conv2d(width // 2, time_out, kernel_size=1)
 
     def get_grid(self, b, nx, ny, device):
         gridx = torch.linspace(0, 1, nx, device=device)
         gridy = torch.linspace(0, 1, ny, device=device)
-        gridx = gridx.view(1, 1, nx, 1).repeat(b, 1, 1, ny)
+        gridx = gridx.view(1, 1, nx, 1).repeat(b, 1, 1, ny, 1) if gridx.dim() == 4 else gridx.view(1, 1, nx, 1).repeat(b, 1, 1, ny)
         gridy = gridy.view(1, 1, 1, ny).repeat(b, 1, nx, 1)
         return torch.cat((gridx, gridy), dim=1) 
 
     def forward(self, x):
         b, nx, ny, _ = x.shape
-        # Extract last known PM2.5 state for residual connection
         last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2) 
         
         x_in = x.permute(0, 3, 1, 2)
-        grid = self.get_grid(b, nx, ny, x.device) 
+        
+        # Note: Added fixing grid issues in the original
+        gridx = torch.linspace(0, 1, nx, device=x.device)
+        gridy = torch.linspace(0, 1, ny, device=x.device)
+        gridx = gridx.view(1, 1, nx, 1).repeat(b, 1, 1, ny)
+        gridy = gridy.view(1, 1, 1, ny).repeat(b, 1, nx, 1)
+        grid = torch.cat((gridx, gridy), dim=1) 
+        
         x_in = torch.cat([x_in, grid], dim=1) 
         
-        x_feat = self.input_encoder(x_in)
+        # Encoder (Save for skip connection)
+        x_skip = self.inc(x_in)       # Shape: (B, 64, 140, 124)
         
-        # WNO Spatial Mixing (No padding needed, 140 and 124 divide evenly by 2!)
-        x_wno = self.block0(x_feat)
-        x_wno = self.block1(x_wno)
-        x_wno = self.block2(x_wno)
-        x_wno = self.block3(x_wno)
+        # Downsample
+        x_down = self.down(x_skip)    # Shape: (B, 128, 70, 62)
         
-        # Decode to DELTA (network learns the change from current state)
-        x_wno = F.gelu(self.fc1(x_wno))
-        out = self.fc2(x_wno) 
+        # WNO Bottleneck
+        x_wno = self.wno_blocks(x_down) # Shape: (B, 128, 70, 62)
         
-        # FIX #1: RESIDUAL CONNECTION
-        # 'out' shape is (B, 16, H, W). 'last_pm25' shape is (B, 1, H, W).
-        # Broadcasting adds the last known PM2.5 state to all 16 future steps.
-        # This lets the network learn DELTA (change) instead of absolute values.
+        # Upsample
+        x_up = self.up(x_wno)         # Shape: (B, 64, 140, 124)
+        
+        # Skip Connection (Concatenate along channel dim)
+        x_concat = torch.cat([x_up, x_skip], dim=1) # Shape: (B, 128, 140, 124)
+        
+        # Decode
+        x_dec = self.dec(x_concat)
+        out = self.fc_out(x_dec)
+        
+        # Residual Connection (Predicting the Delta)
         out = out + last_pm25
         
         return out.permute(0, 2, 3, 1)

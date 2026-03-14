@@ -4,7 +4,7 @@ import numpy as np
 from tqdm import tqdm
 import warnings
 
-from models.baseline_model import FNO2D
+from models.baseline_model import WaveletUNet
 from src.utils.config import load_config
 
 warnings.filterwarnings("ignore")
@@ -140,11 +140,10 @@ topo_channels = 1
 in_channels = pm_channels + temporal_channels + static_channels + topo_channels
 
 print(f"Building WNO Model with optimized {in_channels} input channels...")
-model = FNO2D(
+model = WaveletUNet(
     in_channels=in_channels,
     time_out=cfg_train.data.time_out,
     width=cfg_train.model.width,
-    modes=cfg_train.model.modes,
     time_input=cfg_train.data.time_input
 ).to(device)
 

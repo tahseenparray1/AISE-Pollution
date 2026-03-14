@@ -8,9 +8,19 @@ import numpy as np
 from tqdm import tqdm
 from src.utils.adam import Adam
 from src.utils.config import load_config
-from models.baseline_model import FNO2D
+from models.baseline_model import WaveletUNet
 from torch.optim.swa_utils import AveragedModel, SWALR 
 
+def spike_weighted_mse_loss(pred_phys, targ_phys, threshold=150.0):
+    """
+    Forces the network to accurately predict massive PM2.5 spikes.
+    Kaggle's RMSE is dominated by large errors.
+    """
+    # Base weight is 1.0. If actual pollution > 150 µg/m³, weight is 3.0
+    weight = torch.where(targ_phys > threshold, 3.0, 1.0)
+    
+    squared_error = weight * (pred_phys - targ_phys) ** 2
+    return squared_error.mean()
 # ==========================================
 # 1. SETUP & CONFIGURATION
 # ==========================================
@@ -120,11 +130,10 @@ topo_channels = 1
 in_channels = pm_channels + temporal_channels + static_channels + topo_channels
 print(f"Building Model with optimized {in_channels} input channels (Massive memory saving!)...")
 
-model = FNO2D(
+model = WaveletUNet(
     in_channels=in_channels, 
     time_out=cfg.data.time_out, 
     width=cfg.model.width, 
-    modes=cfg.model.modes,
     time_input=cfg.data.time_input
 ).to(device)
 
@@ -166,14 +175,14 @@ for ep in range(cfg.training.epochs):
         targ_phys = to_physical(y)
         
         # --- NEW LOSS FORMULATION ---
-        # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+        # 1. Direct Physical Weighted MSE (Focuses on spikes to crush RMSE)
+        mse_loss = spike_weighted_mse_loss(pred_phys, targ_phys)
         
         # 2. Spatial Gradient Loss (Keeps plume edges sharp)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
         # 3. Blended Total Loss
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = mse_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
