@@ -40,7 +40,7 @@ paths:
 data:
   months: ["APRIL_16", "JULY_16", "OCT_16", "DEC_16"]
   horizon: 26
-  stride: 1
+  stride: 4
   val_frac: 0.2
   seed: 0
 
@@ -68,7 +68,7 @@ data:
   S1: 140
   S2: 124
   total_time: 26
-  stride: 1
+  stride: 4
 
 features:
   V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
@@ -87,7 +87,7 @@ training:
   lr: 1e-3
   weight_decay: 1e-5
   checkpoint_every: 10
-  save_checkpoint: False
+  save_checkpoint: True
   early_stopping: False
 
 ===== C:\Code\AISE\models\baseline_model.py =====
@@ -541,7 +541,7 @@ torch.backends.cudnn.benchmark = True
 np.random.seed(0)
 
 # === FAST DEV RUN: Set to True for quick testing, False for full training ===
-FAST_DEV_RUN = True
+FAST_DEV_RUN = False
 MAX_BATCHES = 10 if FAST_DEV_RUN else None  # None = use all batches
 MAX_EPOCHS = 10 if FAST_DEV_RUN else cfg.training.epochs
 
@@ -652,6 +652,12 @@ swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
 # ==========================================
 # 5. TRAINING LOOP
 # ==========================================
+# Create a linearly increasing weight tensor for the 16 hours
+# E.g., Hour 1 gets a weight of 1.0, Hour 16 gets a weight of ~3.0
+time_weights = torch.linspace(1.0, 3.0, steps=cfg.data.time_out).to(device)
+# Reshape to broadcast correctly against (Batch, H, W, Time)
+time_weights = time_weights.view(1, 1, 1, cfg.data.time_out)
+
 scaler = torch.amp.GradScaler("cuda")
 
 best_val_rmse = float('inf')
@@ -679,8 +685,15 @@ for ep in range(MAX_EPOCHS):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            # Pure MSE in physical space (directly matches Kaggle RMSE metric)
-            total_loss = F.mse_loss(pred_phys, targ_phys)
+            # --- TIME-WEIGHTED MSE LOSS ---
+            # 1. Calculate raw squared error per pixel per timestep
+            raw_sq_error = (pred_phys - targ_phys) ** 2
+            
+            # 2. Multiply by our temporal penalty (punish later hours more)
+            weighted_sq_error = raw_sq_error * time_weights
+            
+            # 3. Take the mean to get the final scalar loss
+            total_loss = torch.mean(weighted_sq_error)
 
         
         with torch.no_grad():

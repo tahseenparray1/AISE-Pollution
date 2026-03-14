@@ -166,14 +166,19 @@ for ep in range(MAX_EPOCHS):
             pred_phys = to_physical(out)
             targ_phys = to_physical(y)
             
-            # --- TIME-WEIGHTED MSE LOSS ---
-            # 1. Calculate raw squared error per pixel per timestep
-            raw_sq_error = (pred_phys - targ_phys) ** 2
+            # --- TIME & MAGNITUDE WEIGHTED MSE LOSS ---
+            # 1. Base Squared Error
+            base_sq_error = (pred_phys - targ_phys) ** 2
             
-            # 2. Multiply by our temporal penalty (punish later hours more)
-            weighted_sq_error = raw_sq_error * time_weights
+            # 2. Magnitude Weights: Force the model to care about the 1% extreme spikes
+            # For a pixel with 0 pollution, weight is 1.0
+            # For a pixel with 300 pollution, weight is 1.0 + (300/100) = 4.0
+            magnitude_weights = 1.0 + (targ_phys / 100.0)
             
-            # 3. Take the mean to get the final scalar loss
+            # 3. Combine penalties (time_weights is already defined outside your loop)
+            weighted_sq_error = base_sq_error * time_weights * magnitude_weights
+            
+            # 4. Final Scalar Loss
             total_loss = torch.mean(weighted_sq_error)
 
         

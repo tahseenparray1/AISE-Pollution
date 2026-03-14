@@ -6,7 +6,7 @@ from src.utils.config import load_config
 cfg = load_config("configs/prepare_dataset.yaml")
 RAW_PATH = cfg.paths.raw_path
 
-derived_features = ['wind_speed', 'vent_coef', 'rain_mask']
+derived_features = ['wind_speed', 'vent_coef', 'rain_mask', 'delta_swdown', 't2_mean_proxy']
 all_features = cfg.features.met_variables_raw + cfg.features.emission_variables_raw + derived_features
 
 def load_raw_or_derived(feat, month):
@@ -27,6 +27,20 @@ def load_raw_or_derived(feat, month):
         rain = np.load(os.path.join(RAW_PATH, month, "rain.npy")).astype(np.float32)
         return (rain > 0).astype(np.float32)
         
+    elif feat == 'delta_swdown':
+        swdown = np.load(os.path.join(RAW_PATH, month, "swdown.npy")).astype(np.float32)
+        # Calculate difference hour-to-hour. Pad the first hour with the edge value.
+        delta_sw = np.diff(swdown, axis=0)
+        return np.pad(delta_sw, ((1, 0), (0, 0), (0, 0)), mode='edge')
+        
+    elif feat == 't2_mean_proxy':
+        t2 = np.load(os.path.join(RAW_PATH, month, "t2.npy")).astype(np.float32)
+        # Subtracting 273.15 to center it around Celsius helps the neural net scaling
+        # We take a spatial mean to represent the "Macro Season" 
+        t2_macro = np.mean(t2, axis=(1, 2), keepdims=True) - 273.15
+        # Broadcast back to the grid shape
+        return np.broadcast_to(t2_macro, t2.shape).astype(np.float32)
+
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         

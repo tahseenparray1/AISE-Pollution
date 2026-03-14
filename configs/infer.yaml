@@ -18,11 +18,11 @@ data:
   S2: 124
 
 features:
-  V: 18
+  V: 20
   met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
+  derived_variables: ["wind_speed", "vent_coef", "rain_mask", "delta_swdown", "t2_mean_proxy"]
 
 model:
   modes: 8
