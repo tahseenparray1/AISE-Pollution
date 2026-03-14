@@ -90,7 +90,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # 4. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        # Combine everything (10 + 260 + 7 + 1 = 278 Channels)
+        # Combine everything (10 + 312 + 7 + 1 = 330 Channels)
         x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
         
         # Target
@@ -107,7 +107,7 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # 4. MODEL & OPTIMIZER
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time # 10 dynamic features * 26 hours
+temporal_channels = 12 * cfg.data.total_time # 12 dynamic features * 26 hours
 static_channels = 7 # 7 emission proxy maps
 topo_channels = 1
 

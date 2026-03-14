@@ -117,7 +117,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         # Topo — single global map, identical for all samples
         topo_tensor = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
         
-        # Combine (10 + 260 + 7 + 1 = 278 Channels)
+        # Combine (10 + 312 + 7 + 1 = 330 Channels)
         x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
 
         return x
@@ -129,7 +129,7 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # 3. MODEL INITIALIZATION
 # ==========================================
 pm_channels = cfg_train.data.time_input
-temporal_channels = 10 * cfg_train.data.total_time 
+temporal_channels = 12 * cfg_train.data.total_time 
 static_channels = 7 
 topo_channels = 1
 
