@@ -30,9 +30,15 @@ def load_raw_or_derived(feat, month):
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         
-        # --- THE FIX: pblh added to log transform to compress diurnal variance ---
-        skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh'] 
-        if feat in skewed_features:
+        # --- NEW: UNMASK THE EMISSIONS ---
+        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+        if feat in emi_vars:
+            arr = arr * 1e6  # Scale up so the network can see it!
+            arr = np.log1p(arr) # Now log1p will actually work
+            return arr
+            
+        # Non-emission skewed features
+        if feat in ['rain', 'pblh']: 
             arr = np.log1p(arr)
             
         return arr
@@ -46,7 +52,8 @@ def compute_gridwise_robust_stats(features, months):
         
         median = np.median(feat_data, axis=0)
         q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
-        iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
+        clip_min = 5.0 if feat not in cfg.features.emission_variables_raw else 0.1
+        iqr = np.clip(q75 - q25, a_min=clip_min, a_max=None)
         
         stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32)}
         
