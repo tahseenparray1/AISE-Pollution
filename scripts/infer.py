@@ -173,7 +173,7 @@ with torch.no_grad():
         out = model(x)
         out_real = denorm(out.cpu().numpy())
         
-         prediction[current_idx : current_idx + bs] = np.clip(out_real, 0, None)
+        prediction[current_idx : current_idx + bs] = np.clip(out_real, 0, None)
         current_idx += bs
 
 # ==========================================
