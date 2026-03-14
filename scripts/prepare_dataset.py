@@ -3,7 +3,7 @@ import numpy as np
 from tqdm import tqdm
 from src.utils.config import load_config
 
-cfg = load_config("configs/prepare_rapid.yaml")
+cfg = load_config("configs/prepare_dataset.yaml")
 RAW_PATH = cfg.paths.raw_path
 
 derived_features = ['wind_speed', 'vent_coef', 'rain_mask']
