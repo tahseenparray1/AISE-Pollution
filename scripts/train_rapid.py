@@ -142,9 +142,9 @@ for ep in range(cfg.training.epochs):
         pred_phys = to_physical(out)
         targ_phys = to_physical(y)
         
-        mse_loss = F.mse_loss(pred_phys, targ_phys)
+        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-        total_loss = mse_loss + 0.1 * loss_grad
+        total_loss = huber_loss + 0.1 * loss_grad
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
