@@ -10,7 +10,7 @@
 *.hdf5
 *.pb
 *.onnx
-
+*.txt
 # Data files
 *.npy
 *.npz

@@ -1,0 +1,19 @@
+paths:
+  raw_path: /kaggle/input/competitions/aisehack-theme-2/raw/
+  train_savepath: /kaggle/temp/data/train_rapid/
+  val_savepath: /kaggle/temp/data/val_rapid/
+  topo_path: /kaggle/working/topo_proxy.npy
+  stats_path: /kaggle/working/grid_robust_stats.npy
+
+data:
+  months: ["APRIL_16", "JULY_16", "OCT_16", "DEC_16"]
+  horizon: 26
+  stride: 24
+  val_frac: 0.2
+  seed: 0
+
+features:
+  met_variables_raw:
+    ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+  emission_variables_raw:
+    ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
