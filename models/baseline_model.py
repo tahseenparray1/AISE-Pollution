@@ -1,12 +1,5 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
-def check_nan(tensor, name):
-    if torch.isnan(tensor).any() or torch.isinf(tensor).any():
-        print(f"!!! NAN or INF DETECTED AT: {name} !!!")
-        return True
-    return False
 
 class HaarWavelet2D(nn.Module):
     """ Native PyTorch 2D Haar Discrete Wavelet Transform """
@@ -67,24 +60,13 @@ class TemporalEncoder(nn.Module):
 
     def forward(self, x):
         # x is expected to be (Batch, Features, Time)
-        x1 = self.conv1(x)
-        if check_nan(x1, "TemporalEncoder conv1 output"): pass
-        x1_n = self.norm1(x1)
-        if check_nan(x1_n, "TemporalEncoder norm1 output"): pass
-        x1_r = F.relu(x1_n)
-        
-        x2 = self.conv2(x1_r)
-        if check_nan(x2, "TemporalEncoder conv2 output"): pass
-        x2_n = self.norm2(x2)
-        if check_nan(x2_n, "TemporalEncoder norm2 output"): pass
-        x = F.relu(x2_n)
+        x = F.relu(self.norm1(self.conv1(x)))
+        x = F.relu(self.norm2(self.conv2(x)))
         
         # Flatten the feature and time dimensions
         x = x.view(x.size(0), -1) # Now safe to use .view() here
-        x_fc = self.fc(x)            # (Batch, out_features)
-        if check_nan(x_fc, "TemporalEncoder fc output"): pass
-        x = self.norm3(x_fc)  # Lock the output variance before concatenation
-        if check_nan(x, "TemporalEncoder norm3 output"): pass
+        x = self.fc(x)            # (Batch, out_features)
+        x = self.norm3(x)  # Lock the output variance before concatenation
         
         return x
 
@@ -114,35 +96,24 @@ class WNOBlock(nn.Module):
         self.norm = nn.GroupNorm(4, width)
 
     def forward(self, x):
-        if check_nan(x, "WNOBlock input x"): pass
         x_norm = self.norm(x)
-        if check_nan(x_norm, "WNOBlock x_norm"): pass
         
         # 1. Decompose to Wavelet domain
         x_w = self.dwt(x_norm)
-        if check_nan(x_w, "WNOBlock dwt(x_norm)"): pass
         
         # 2. Mix frequencies (Spatial -> Norm -> Pointwise)
         x_w_sp = self.spectral_spatial(x_w)
-        if check_nan(x_w_sp, "WNOBlock spectral_spatial"): pass
-        
         x_w_n = self.spectral_norm(x_w_sp)
-        if check_nan(x_w_n, "WNOBlock spectral_norm"): pass
-        
         x_w_pw = self.spectral_pointwise(x_w_n)
-        if check_nan(x_w_pw, "WNOBlock spectral_pointwise"): pass
         
         # 3. Reconstruct back to Spatial domain
         out_w = self.idwt(x_w_pw)
-        if check_nan(out_w, "WNOBlock idwt"): pass
         
         # 4. Apply large-kernel spatial mixing for extended receptive field
         out_w_m = self.spatial_mixer(out_w)
-        if check_nan(out_w_m, "WNOBlock spatial_mixer"): pass
         
         # 5. Add pointwise mixing and residual
         pw_mix = self.pointwise(x_norm)
-        if check_nan(pw_mix, "WNOBlock pointwise mix"): pass
         
         out = out_w_m + pw_mix
         return x + F.gelu(out)
@@ -192,8 +163,6 @@ class FNO2D(nn.Module):
         return torch.cat((gridx, gridy), dim=1) 
 
     def forward(self, x):
-        if check_nan(x, "FNO2D VERY FIRST INPUT"): pass
-        
         b, nx, ny, _ = x.shape
         # Extract last known PM2.5 state for residual connection
         last_pm25 = x[..., self.time_input-1:self.time_input].permute(0, 3, 1, 2) 
@@ -215,7 +184,6 @@ class FNO2D(nn.Module):
         temporal_flat = temporal.permute(0, 1, 2, 4, 3).reshape(-1, self.num_temporal_features, self.total_time)
         
         temporal_encoded = self.temporal_encoder(temporal_flat) # (b * nx * ny, 32)
-        if check_nan(temporal_encoded, "FNO2D AFTER temporal_encoder"): pass
         temporal_encoded = temporal_encoded.reshape(b, nx, ny, 32)
         
         # Re-concatenate
@@ -226,28 +194,18 @@ class FNO2D(nn.Module):
         x_in = torch.cat([x_in, grid], dim=1) 
         
         x_feat = self.input_encoder(x_in)
-        if check_nan(x_feat, "FNO2D AFTER input_encoder"): pass
         
         # WNO Spatial Mixing (No padding needed, 140 and 124 divide evenly by 2!)
         x_wno = self.block0(x_feat)
-        if check_nan(x_wno, "FNO2D AFTER block0"): pass
-        
         x_wno = self.block1(x_wno)
-        if check_nan(x_wno, "FNO2D AFTER block1"): pass
-        
         x_wno = self.block2(x_wno)
-        if check_nan(x_wno, "FNO2D AFTER block2"): pass
-        
         x_wno = self.block3(x_wno)
-        if check_nan(x_wno, "FNO2D AFTER block3"): pass
         
         # Decode to DELTA (network learns the change from current state)
         x_wno = self.fc1(x_wno)
-        if check_nan(x_wno, "FNO2D AFTER fc1"): pass
         
         x_wno = F.gelu(x_wno)
         out = self.fc2(x_wno) 
-        if check_nan(out, "FNO2D AFTER fc2"): pass
         
         # FIX #1: RESIDUAL CONNECTION
         # 'out' shape is (B, 16, H, W). 'last_pm25' shape is (B, 1, H, W).
