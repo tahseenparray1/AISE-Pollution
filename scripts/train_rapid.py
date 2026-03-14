@@ -64,10 +64,8 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         assert 'cpm25' in all_features, "Target variable 'cpm25' must be in met_variables!"
         self.target_idx = all_features.index('cpm25')
         
-        self.temporal_idx = [i for i, f in enumerate(all_features) 
-                           if f != 'cpm25' and f not in cfg.features.emission_variables]
-        self.static_idx = [i for i, f in enumerate(all_features) 
-                          if f in cfg.features.emission_variables]
+        # ALL features (weather + emissions) except the target are now temporal!
+        self.temporal_idx = [i for i, f in enumerate(all_features) if f != 'cpm25']
         self.topo_idx = len(all_features)
 
     def __len__(self): 
@@ -77,13 +75,18 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         start = self.valid_starts[idx]
         window = self.data[start : start + self.total_time].clone() 
         
+        # 1. PM2.5 Historical Context (10 channels)
         pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
-        temporal_weather = window[:, ..., self.temporal_idx]
-        temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
-        static_emissions = window[:, ..., self.static_idx].mean(dim=0)
+        
+        # 2. Dynamic Temporal Features (Weather AND Emissions: 17 features * 26 hours)
+        temporal_all = window[:, ..., self.temporal_idx]
+        temporal_tensor = temporal_all.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
+        
+        # 3. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
+        # Combine (10 + 442 + 1 = 453 Channels)
+        x = torch.cat((pm_hist, temporal_tensor, topo), dim=-1)
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
         return x, y
 
@@ -99,11 +102,11 @@ print(f"Rapid Dataset: {len(train_ds)} train samples, {len(val_ds)} val samples"
 # 4. MODEL & OPTIMIZER (No SWA)
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time
-static_channels = 7
+# Dynamically calculate based on the new temporal stack (17 * 26 = 442)
+temporal_channels = len(train_ds.temporal_idx) * cfg.data.total_time
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+in_channels = pm_channels + temporal_channels + topo_channels
 print(f"Building Model with optimized {in_channels} input channels...")
 
 model = FNO2D(
