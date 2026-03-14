@@ -155,6 +155,9 @@ for ep in range(cfg.training.epochs):
     model.train()
     t_start = time.time()
     train_mse_acc = 0.0
+    train_spk_mse_acc = 0.0
+    train_grad_acc = 0.0
+    train_total_loss_acc = 0.0
 
     for x, y in tqdm(train_loader, desc=f"Epoch {ep}"):
         x, y = x.to(device), y.to(device)
@@ -188,6 +191,10 @@ for ep in range(cfg.training.epochs):
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
             train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
+            train_spk_mse_acc += mse_loss.item()
+            train_grad_acc += loss_grad.item()
+            train_total_loss_acc += total_loss.item()
+            
         total_loss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -226,14 +233,29 @@ for ep in range(cfg.training.epochs):
     val_rmse = np.sqrt(val_mse_acc / len(val_loader))
     
     duration = time.time() - t_start
-    print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
+    avg_spk_mse = train_spk_mse_acc / len(train_loader)
+    avg_grad_loss = train_grad_acc / len(train_loader)
+    avg_total_loss = train_total_loss_acc / len(train_loader)
+    current_lr = optimizer.param_groups[0]['lr']
+    
+    print(f"Epoch {ep} | Time: {duration:.1f}s | LR: {current_lr:.2e}")
+    print(f"  -> Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
+    print(f"  -> Train Spk-MSE: {avg_spk_mse:.4f} | Grad: {avg_grad_loss:.4f} | Total: {avg_total_loss:.4f}")
 
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
         if cfg.training.save_checkpoint:
             # Save the currently evaluating model's dict (which will be SWA if active)
             torch.save({'model_state_dict': eval_model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
-        print(f"  -> New Best Val RMSE: {best_val_rmse:.4f}")
+        print(f"  -> *** New Best Val RMSE: {best_val_rmse:.4f} ***")
 
-    log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})
+    log.append({
+        "epoch": ep, 
+        "train_rmse": train_rmse, 
+        "val_rmse": val_rmse,
+        "lr": current_lr,
+        "spk_mse": avg_spk_mse,
+        "grad_loss": avg_grad_loss,
+        "total_loss": avg_total_loss
+    })
     with open(cfg.paths.save_dir, 'w') as f: json.dump(log, f)
