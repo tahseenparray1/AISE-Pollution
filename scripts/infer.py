@@ -63,6 +63,9 @@ class TestDataLoader(torch.utils.data.Dataset):
 
         self.N = self.arrs['cpm25'].shape[0]
 
+        # Explicitly load rain for rain_mask (rain is not in met_variables anymore)
+        self.rain_raw = np.load(os.path.join(cfg_infer.paths.input_loc, "rain.npy"), mmap_mode="r")
+
     def __len__(self):
         return self.N
 
@@ -78,20 +81,22 @@ class TestDataLoader(torch.utils.data.Dataset):
         # 2. Compute Derived Features
         ws = np.sqrt(seq_raw['u10']**2 + seq_raw['v10']**2)
         vc = np.log1p(ws * seq_raw['pblh'])
-        rm = (seq_raw['rain'] > 0).astype(np.float32)
+        
+        # Explicit rain load
+        rain_slice = np.array(self.rain_raw[idx, :self.total_time], dtype=np.float32)
+        rm = (rain_slice > 0).astype(np.float32)
         
         seq_raw['wind_speed'] = ws
         seq_raw['vent_coef'] = vc
         seq_raw['rain_mask'] = rm
         
-        # 3. Apply Log Transforms
-        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+        # 3. Apply Pruned Log Transforms
+        emi_vars = ["PM25", "NH3", "NOx", "NMVOC_e"]
         for feat in emi_vars:
             if feat in seq_raw:
-                # Apply the EXACT same 1e11 scale + log1p
                 seq_raw[feat] = np.log1p(seq_raw[feat] * 1e11)
                 
-        skewed_features = ['rain', 'pblh']
+        skewed_features = ['pblh']
         for feat in skewed_features:
             if feat in seq_raw:
                 seq_raw[feat] = np.log1p(seq_raw[feat])
@@ -123,7 +128,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         # Topo
         topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
         
-        # Combine (10 + 442 + 1 = 453 Channels)
+        # Combine (10 + 312 + 1 = 323 Channels)
         x = torch.cat((pm25_hist, temporal_tensor, topo_tensor), dim=-1)
 
         return x
