@@ -127,7 +127,7 @@ class FNO2D(nn.Module):
             nn.Conv2d(new_in_channels + 2, width, kernel_size=1),
             nn.GroupNorm(4, width),
             nn.GELU(),
-            nn.Dropout(p=0.05)
+            nn.Dropout(p=0.20)
         )
         
         # Stack WNO blocks instead of FNO blocks
