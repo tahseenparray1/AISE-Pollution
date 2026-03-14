@@ -33,5 +33,5 @@ training:
   lr: 1e-3
   weight_decay: 1e-5
   checkpoint_every: 10
-  save_checkpoint: False
+  save_checkpoint: True
   early_stopping: False

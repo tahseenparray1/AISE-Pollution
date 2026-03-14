@@ -95,40 +95,30 @@ class TestDataLoader(torch.utils.data.Dataset):
             if feat in seq_raw:
                 seq_raw[feat] = np.log1p(seq_raw[feat])
 
-        # 4. Normalize and Categorize Features
+        # 4. Normalize Features
         pm25_hist = None
         temporal_feats = []
-        static_feats = []
         
-        # Process Temporal (Weather & Derived)
-        temporal_list = [f for f in self.met_variables if f != 'cpm25'] + cfg_train.features.derived_variables
+        # Process ALL dynamic features (Weather + Derived + Emissions)
+        temporal_list = [f for f in self.met_variables if f != 'cpm25'] + cfg_train.features.derived_variables + self.emi_variables
         for feat in temporal_list:
             arr = (seq_raw[feat] - self.stats[feat]['median']) / self.stats[feat]['iqr']
             temporal_feats.append(arr)
             
-        # Process Static (Emissions)
-        for feat in self.emi_variables:
-            arr = (seq_raw[feat] - self.stats[feat]['median']) / self.stats[feat]['iqr']
-            static_feats.append(arr)
-            
         # Get PM25
         pm25_hist = (seq_raw['cpm25'] - self.stats['cpm25']['median']) / self.stats['cpm25']['iqr']
         pm25_hist = torch.from_numpy(pm25_hist).permute(1, 2, 0) # (140, 124, 10)
-
+        
         # 5. Build Tensors (Matching train.py exactly)
-        # Temporal: (Channels, Time, H, W) -> (H, W, Time, Channels) -> (H, W, Time * Channels)
+        # Temporal: Stack -> (Channels, Time, H, W) -> (H, W, Time, Channels) -> (H, W, Time * Channels)
         temporal_stack = np.stack(temporal_feats, axis=0)
         temporal_tensor = torch.from_numpy(temporal_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
-        
-        # Static: Stack -> Mean across time -> (Channels, Time, H, W) -> (Channels, H, W) -> (H, W, Channels)
-        static_stack = np.stack(static_feats, axis=0)
-        static_tensor = torch.from_numpy(static_stack).mean(dim=1).permute(1, 2, 0)
         
         # Topo
         topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
         
-        # Combine (10 + 260 + 7 + 1 = 278 Channels)
-        x = torch.cat((pm25_hist, temporal_tensor, static_tensor, topo_tensor), dim=-1)
+        # Combine (10 + 442 + 1 = 453 Channels)
+        x = torch.cat((pm25_hist, temporal_tensor, topo_tensor), dim=-1)
 
         return x
 
@@ -139,11 +129,12 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # 3. MODEL INITIALIZATION
 # ==========================================
 pm_channels = cfg_train.data.time_input
-temporal_channels = 10 * cfg_train.data.total_time 
-static_channels = 7 
+# Dynamic temporal channels (17 features * 26 hours)
+num_temporal_features = (len(cfg_train.features.met_variables) - 1) + len(cfg_train.features.derived_variables) + len(cfg_train.features.emission_variables)
+temporal_channels = num_temporal_features * cfg_train.data.total_time 
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+in_channels = pm_channels + temporal_channels + topo_channels
 
 print(f"Building WNO Model with optimized {in_channels} input channels...")
 model = FNO2D(

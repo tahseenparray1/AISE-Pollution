@@ -67,13 +67,8 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         assert 'cpm25' in all_features, "Target variable 'cpm25' must be in met_variables!"
         self.target_idx = all_features.index('cpm25')
         
-        # Temporal weather feature indices (met vars except cpm25, plus derived vars)
-        self.temporal_idx = [i for i, f in enumerate(all_features) 
-                           if f != 'cpm25' and f not in cfg.features.emission_variables]
-        # Static emission feature indices
-        self.static_idx = [i for i, f in enumerate(all_features) 
-                          if f in cfg.features.emission_variables]
-        # Topography is the last channel appended in prepare_dataset.py
+        # ALL features (weather + emissions) except the target are now temporal!
+        self.temporal_idx = [i for i, f in enumerate(all_features) if f != 'cpm25']
         self.topo_idx = len(all_features)
 
     def __len__(self): 
@@ -86,18 +81,15 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # 1. PM2.5 Historical Context (10 channels)
         pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
         
-        # 2. Dynamic Temporal Weather (10 features * 26 hours = 260 channels)
-        temporal_weather = window[:, ..., self.temporal_idx]
-        temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
+        # 2. Dynamic Temporal Features (Weather AND Emissions: 17 features * 26 hours)
+        temporal_all = window[:, ..., self.temporal_idx]
+        temporal_tensor = temporal_all.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
         
-        # 3. Static Emissions (Mean across the 26 hours to collapse to 7 spatial channels)
-        static_emissions = window[:, ..., self.static_idx].mean(dim=0)
-        
-        # 4. Static Topography (1 channel)
+        # 3. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        # Combine everything (10 + 260 + 7 + 1 = 278 Channels)
-        x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
+        # Combine (10 + 442 + 1 = 453 Channels)
+        x = torch.cat((pm_hist, temporal_tensor, topo), dim=-1)
         
         # Target (uses same config-driven index as input)
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
@@ -113,11 +105,11 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # 4. MODEL & OPTIMIZER
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time # 10 dynamic features
-static_channels = 7 # 7 emission proxy maps
+# Dynamically calculate based on the new temporal stack (17 * 26 = 442)
+temporal_channels = len(train_ds.temporal_idx) * cfg.data.total_time
 topo_channels = 1
 
-in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+in_channels = pm_channels + temporal_channels + topo_channels
 print(f"Building Model with optimized {in_channels} input channels (Massive memory saving!)...")
 
 model = FNO2D(
