@@ -80,18 +80,9 @@ class TestDataLoader(torch.utils.data.Dataset):
         vc = np.log1p(ws * seq_raw['pblh'])
         rm = (seq_raw['rain'] > 0).astype(np.float32)
         
-        # Calculate Kinematic Convergence
-        # Test input shape for met variables is (samples, 26, 140, 124)
-        # But here we are indexing a single sample, so seq_raw['u10'] is (26, 140, 124)
-        # We want gradients along axis 2 (lon/x) for u, and axis 1 (lat/y) for v
-        du_dx = np.gradient(seq_raw['u10'], axis=2)
-        dv_dy = np.gradient(seq_raw['v10'], axis=1)
-        conv = -(du_dx + dv_dy)
-        
         seq_raw['wind_speed'] = ws
         seq_raw['vent_coef'] = vc
         seq_raw['rain_mask'] = rm
-        seq_raw['wind_convergence'] = conv
         
         # 3. Apply Log Transforms
         skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh']
@@ -142,7 +133,7 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # 3. MODEL INITIALIZATION
 # ==========================================
 pm_channels = cfg_train.data.time_input
-temporal_channels = 11 * cfg_train.data.total_time 
+temporal_channels = 10 * cfg_train.data.total_time 
 static_channels = 7 
 topo_channels = 1
 

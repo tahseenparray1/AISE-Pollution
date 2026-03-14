@@ -6,7 +6,7 @@ from src.utils.config import load_config
 cfg = load_config("configs/prepare_rapid.yaml")
 RAW_PATH = cfg.paths.raw_path
 
-derived_features = ['wind_speed', 'vent_coef', 'rain_mask', 'wind_convergence']
+derived_features = ['wind_speed', 'vent_coef', 'rain_mask']
 all_features = cfg.features.met_variables_raw + cfg.features.emission_variables_raw + derived_features
 
 def load_raw_or_derived(feat, month):
@@ -26,27 +26,6 @@ def load_raw_or_derived(feat, month):
     elif feat == 'rain_mask':
         rain = np.load(os.path.join(RAW_PATH, month, "rain.npy")).astype(np.float32)
         return (rain > 0).astype(np.float32)
-        
-    elif feat == 'wind_convergence':
-        # Kinematic Convergence = -(du/dx + dv/dy)
-        # We need to compute spatial gradients for each timestep.
-        # Data shape: (T, 140, 124). Spatial dims are axis 1 (y/lat) and axis 2 (x/lon).
-        # We assume uniform grid spacing, so we just use the raw differences.
-        
-        u = np.load(os.path.join(RAW_PATH, month, "u10.npy")).astype(np.float32)
-        v = np.load(os.path.join(RAW_PATH, month, "v10.npy")).astype(np.float32)
-        
-        # np.gradient computes central differences: returns a list [dt, dy, dx]
-        # v10 is meridional (y-direction wind) -> we want dv/dy (axis 1)
-        # u10 is zonal (x-direction wind) -> we want du/dx (axis 2)
-        
-        # We don't care about the time gradient (axis 0), so we only ask for axes 1 and 2
-        # However, it's easier to just compute it across all axes and take what we need
-        du_dx = np.gradient(u, axis=2)
-        dv_dy = np.gradient(v, axis=1)
-        
-        convergence = -(du_dx + dv_dy)
-        return convergence
         
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)

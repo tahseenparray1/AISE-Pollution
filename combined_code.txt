@@ -92,11 +92,11 @@ data:
   stride: 4
 
 features:
-  V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
+  V: 19 # 1 PM2.5 + 7 met + 7 emi + 4 derived
   met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"] # psfc removed
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
+  derived_variables: ["wind_speed", "vent_coef", "rain_mask", "wind_convergence"]
 
 model:
   modes: 8
@@ -132,14 +132,13 @@ data:
   stride: 4
 
 features:
-  V: 18 # 1 PM2.5 + 7 met + 7 emi + 3 derived
+  V: 19 # 1 PM2.5 + 7 met + 7 emi + 4 derived
   met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"] # psfc removed
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
+  derived_variables: ["wind_speed", "vent_coef", "rain_mask", "wind_convergence"]
 
 model:
-  modes: 8
   width: 256
 
 training:
@@ -211,8 +210,7 @@ class WNOBlock(nn.Module):
         
         # FIX #4: Depthwise conv with large kernel to expand receptive field
         # Enables modeling long-range wind advection across the 140x124 spatial grid
-        self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=2, groups=width)
-        
+        self.spatial_mixer = nn.Conv2d(width, width, kernel_size=5, padding=4, dilation=2, groups=width)
         self.pointwise = nn.Conv2d(width, width, 1)
         self.norm = nn.GroupNorm(4, width)
 
@@ -383,9 +381,18 @@ class TestDataLoader(torch.utils.data.Dataset):
         vc = np.log1p(ws * seq_raw['pblh'])
         rm = (seq_raw['rain'] > 0).astype(np.float32)
         
+        # Calculate Kinematic Convergence
+        # Test input shape for met variables is (samples, 26, 140, 124)
+        # But here we are indexing a single sample, so seq_raw['u10'] is (26, 140, 124)
+        # We want gradients along axis 2 (lon/x) for u, and axis 1 (lat/y) for v
+        du_dx = np.gradient(seq_raw['u10'], axis=2)
+        dv_dy = np.gradient(seq_raw['v10'], axis=1)
+        conv = -(du_dx + dv_dy)
+        
         seq_raw['wind_speed'] = ws
         seq_raw['vent_coef'] = vc
         seq_raw['rain_mask'] = rm
+        seq_raw['wind_convergence'] = conv
         
         # 3. Apply Log Transforms
         skewed_features = ['rain', 'bio', 'NMVOC_finn', 'pblh']
@@ -436,7 +443,7 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=Fa
 # 3. MODEL INITIALIZATION
 # ==========================================
 pm_channels = cfg_train.data.time_input
-temporal_channels = 10 * cfg_train.data.total_time 
+temporal_channels = 11 * cfg_train.data.total_time 
 static_channels = 7 
 topo_channels = 1
 
@@ -498,7 +505,7 @@ from src.utils.config import load_config
 cfg = load_config("configs/prepare_rapid.yaml")
 RAW_PATH = cfg.paths.raw_path
 
-derived_features = ['wind_speed', 'vent_coef', 'rain_mask']
+derived_features = ['wind_speed', 'vent_coef', 'rain_mask', 'wind_convergence']
 all_features = cfg.features.met_variables_raw + cfg.features.emission_variables_raw + derived_features
 
 def load_raw_or_derived(feat, month):
@@ -518,6 +525,27 @@ def load_raw_or_derived(feat, month):
     elif feat == 'rain_mask':
         rain = np.load(os.path.join(RAW_PATH, month, "rain.npy")).astype(np.float32)
         return (rain > 0).astype(np.float32)
+        
+    elif feat == 'wind_convergence':
+        # Kinematic Convergence = -(du/dx + dv/dy)
+        # We need to compute spatial gradients for each timestep.
+        # Data shape: (T, 140, 124). Spatial dims are axis 1 (y/lat) and axis 2 (x/lon).
+        # We assume uniform grid spacing, so we just use the raw differences.
+        
+        u = np.load(os.path.join(RAW_PATH, month, "u10.npy")).astype(np.float32)
+        v = np.load(os.path.join(RAW_PATH, month, "v10.npy")).astype(np.float32)
+        
+        # np.gradient computes central differences: returns a list [dt, dy, dx]
+        # v10 is meridional (y-direction wind) -> we want dv/dy (axis 1)
+        # u10 is zonal (x-direction wind) -> we want du/dx (axis 2)
+        
+        # We don't care about the time gradient (axis 0), so we only ask for axes 1 and 2
+        # However, it's easier to just compute it across all axes and take what we need
+        du_dx = np.gradient(u, axis=2)
+        dv_dy = np.gradient(v, axis=1)
+        
+        convergence = -(du_dx + dv_dy)
+        return convergence
         
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
@@ -723,9 +751,7 @@ val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_s
 # ==========================================
 # 4. MODEL & OPTIMIZER
 # ==========================================
-pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time # 10 dynamic features
-static_channels = 7 # 7 emission proxy maps
+temporal_channels = 11 * cfg.data.total_time # 11 dynamic features
 topo_channels = 1
 
 in_channels = pm_channels + temporal_channels + static_channels + topo_channels
@@ -840,6 +866,157 @@ for ep in range(cfg.training.epochs):
     log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})
     with open(cfg.paths.save_dir, 'w') as f: json.dump(log, f)
 
+===== C:\Code\AISE\scripts\train_overfit.py =====
+import os
+import time
+import json
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from tqdm import tqdm
+from src.utils.adam import Adam
+from src.utils.config import load_config
+from models.baseline_model import FNO2D
+
+# ==========================================
+# 1. SETUP & CONFIGURATION
+# ==========================================
+cfg = load_config("configs/train_rapid.yaml")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(0)
+np.random.seed(0)
+
+S1, S2 = cfg.data.S1, cfg.data.S2
+
+# ==========================================
+# 2. STATS & LOSS UTILITIES
+# ==========================================
+print("Loading robust grid-wise stats...")
+stats = np.load(cfg.paths.stats_path, allow_pickle=True).item()
+
+pm_median_tensor = torch.tensor(stats['cpm25']['median'], dtype=torch.float32).to(device).view(1, S1, S2, 1)
+pm_iqr_tensor = torch.tensor(stats['cpm25']['iqr'], dtype=torch.float32).to(device).view(1, S1, S2, 1)
+
+def to_physical(x_norm):
+    return (x_norm * pm_iqr_tensor) + pm_median_tensor
+
+def spatial_gradient_loss(pred_phys, target_phys):
+    dx_p = pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]
+    dx_t = target_phys[:, 1:, :, :] - target_phys[:, :-1, :, :]
+    dy_p = pred_phys[:, :, 1:, :] - pred_phys[:, :, :-1, :]
+    dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
+    return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
+
+# ==========================================
+# 3. DATA LOADER
+# ==========================================
+class FastInMemoryDataset(torch.utils.data.Dataset):
+    def __init__(self, split, cfg):
+        base_path = getattr(cfg.paths, f"savepath_{split}")
+        self.split = split
+        
+        print(f"[{split.upper()}] Loading into RAM...")
+        self.data = torch.from_numpy(np.load(os.path.join(base_path, f"{split}_data.npy")).astype(np.float32))
+        self.valid_starts = np.load(os.path.join(base_path, f"{split}_indices.npy"))
+        
+        self.time_in = cfg.data.time_input
+        self.total_time = cfg.data.total_time
+        self.S1, self.S2 = cfg.data.S1, cfg.data.S2
+        
+        # Build index mapping dynamically from feature order in prepare_dataset.yaml
+        all_features = (cfg.features.met_variables 
+                       + cfg.features.emission_variables 
+                       + cfg.features.derived_variables)
+        
+        assert 'cpm25' in all_features, "Target variable 'cpm25' must be in met_variables!"
+        self.target_idx = all_features.index('cpm25')
+        
+        self.temporal_idx = [i for i, f in enumerate(all_features) 
+                           if f != 'cpm25' and f not in cfg.features.emission_variables]
+        self.static_idx = [i for i, f in enumerate(all_features) 
+                          if f in cfg.features.emission_variables]
+        self.topo_idx = len(all_features)
+
+    def __len__(self): 
+        return len(self.valid_starts)
+
+    def __getitem__(self, idx):
+        start = self.valid_starts[idx]
+        window = self.data[start : start + self.total_time].clone() 
+        
+        pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
+        temporal_weather = window[:, ..., self.temporal_idx]
+        temporal_weather = temporal_weather.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
+        static_emissions = window[:, ..., self.static_idx].mean(dim=0)
+        topo = window[0, ..., self.topo_idx].unsqueeze(-1)
+        
+        x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
+        y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
+        return x, y
+
+train_ds = FastInMemoryDataset("train", cfg)
+val_ds = FastInMemoryDataset("val", cfg)
+
+train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+
+print(f"Rapid Dataset: {len(train_ds)} train samples, {len(val_ds)} val samples")
+
+# ==========================================
+# 4. MODEL & OPTIMIZER (No SWA)
+# ==========================================
+pm_channels = cfg.data.time_input
+temporal_channels = 11 * cfg.data.total_time
+static_channels = 7
+topo_channels = 1
+
+in_channels = pm_channels + temporal_channels + static_channels + topo_channels
+print(f"Building Model with optimized {in_channels} input channels...")
+
+model = FNO2D(
+    in_channels=in_channels, 
+    time_out=cfg.data.time_out, 
+    width=cfg.model.width, 
+    time_input=cfg.data.time_input
+).to(device)
+
+optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=0.0)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+
+# ==========================================
+# 5. OVERFIT DIAGNOSTIC LOOP
+# ==========================================
+print("Isolating a single batch for overfitting test...")
+single_batch_iterator = iter(train_loader)
+x_single, y_single = next(single_batch_iterator)
+x_single, y_single = x_single.to(device), y_single.to(device)
+
+for ep in range(100):
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+
+    out = model(x_single)
+    pred_phys = to_physical(out)
+    targ_phys = to_physical(y_single)
+
+    mse_loss = F.mse_loss(pred_phys, targ_phys)
+    loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+    total_loss = mse_loss + 0.1 * loss_grad
+
+    total_loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+
+    scheduler.step()
+
+    print(f"Epoch {ep} | Loss: {total_loss.item():.4f}")
+
+print(f"\n{'='*50}")
+print("OVERFIT DIAGNOSTIC COMPLETE")
+print(f"{'='*50}")
+
 ===== C:\Code\AISE\scripts\train_rapid.py =====
 import os
 import time
@@ -942,7 +1119,7 @@ print(f"Rapid Dataset: {len(train_ds)} train samples, {len(val_ds)} val samples"
 # 4. MODEL & OPTIMIZER (No SWA)
 # ==========================================
 pm_channels = cfg.data.time_input
-temporal_channels = 10 * cfg.data.total_time
+temporal_channels = 11 * cfg.data.total_time
 static_channels = 7
 topo_channels = 1
 
@@ -953,7 +1130,6 @@ model = FNO2D(
     in_channels=in_channels, 
     time_out=cfg.data.time_out, 
     width=cfg.model.width, 
-    modes=cfg.model.modes,
     time_input=cfg.data.time_input
 ).to(device)
 
@@ -985,9 +1161,9 @@ for ep in range(cfg.training.epochs):
         pred_phys = to_physical(out)
         targ_phys = to_physical(y)
         
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+        mse_loss = F.mse_loss(pred_phys, targ_phys)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = mse_loss + 0.1 * loss_grad
         
         with torch.no_grad():
             pred_phys_clipped = F.relu(pred_phys.detach())
