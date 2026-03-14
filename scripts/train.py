@@ -15,12 +15,17 @@ from torch.optim.swa_utils import AveragedModel, SWALR
 # ==========================================
 # 1. SETUP & CONFIGURATION
 # ==========================================
+import sys
+
 cfg = load_config("configs/train.yaml")
 
 logging.basicConfig(
-    filename=getattr(cfg.paths, 'log_path', 'training.log'),
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(message)s',
+    handlers=[
+        logging.FileHandler(getattr(cfg.paths, 'log_path', 'training.log')),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -32,7 +37,7 @@ S1, S2 = cfg.data.S1, cfg.data.S2
 # ==========================================
 # 2. STATS & LOSS UTILITIES
 # ==========================================
-print("Loading robust grid-wise stats...")
+logging.info("Loading robust grid-wise stats...")
 stats = np.load(cfg.paths.stats_path, allow_pickle=True).item()
 
 pm_median_tensor = torch.tensor(stats['cpm25']['median'], dtype=torch.float32).to(device).view(1, S1, S2, 1)
@@ -87,7 +92,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         base_path = getattr(cfg.paths, f"savepath_{split}")
         self.split = split
         
-        print(f"[{split.upper()}] Loading into RAM...")
+        logging.info(f"[{split.upper()}] Loading into RAM...")
         self.data = torch.from_numpy(np.load(os.path.join(base_path, f"{split}_data.npy")).astype(np.float32))
         self.valid_starts = np.load(os.path.join(base_path, f"{split}_indices.npy"))
         
@@ -156,7 +161,7 @@ static_channels = 7 # 7 emission proxy maps
 topo_channels = 1
 
 in_channels = pm_channels + temporal_channels + static_channels + topo_channels
-print(f"Building Model with optimized {in_channels} input channels (Massive memory saving!)...")
+logging.info(f"Building Model with optimized {in_channels} input channels (Massive memory saving!)...")
 
 model = FNO2D(
     in_channels=in_channels, 
@@ -323,7 +328,6 @@ for ep in range(cfg.training.epochs):
     duration = time.time() - t_start
     msg = (f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | "
            f"Val RMSE: {val_rmse:.4f} | High PM Val RMSE: {val_high_rmse:.4f} | Low PM Val RMSE: {val_low_rmse:.4f}")
-    print(msg)
     logging.info(msg)
 
     if val_rmse < best_val_rmse:
@@ -332,7 +336,6 @@ for ep in range(cfg.training.epochs):
             # Save the currently evaluating model's dict (which will be SWA if active)
             torch.save({'model_state_dict': eval_model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
         best_msg = f"  -> New Best Val RMSE: {best_val_rmse:.4f}"
-        print(best_msg)
         logging.info(best_msg)
 
     log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})
