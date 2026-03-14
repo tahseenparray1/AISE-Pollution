@@ -84,28 +84,28 @@ class TestDataLoader(torch.utils.data.Dataset):
         seq_raw['vent_coef'] = vc
         seq_raw['rain_mask'] = rm
         
-        # 3. Apply Log Transforms
-        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-        for feat in emi_vars:
-            if feat in seq_raw:
-                seq_raw[feat] = np.log1p(seq_raw[feat] * 1e6)
-                
+        # 3. Apply Log Transforms (Weather only!)
         skewed_features = ['rain', 'pblh']
         for feat in skewed_features:
             if feat in seq_raw:
                 seq_raw[feat] = np.log1p(seq_raw[feat])
 
-        # 4. Normalize Features
+        # 4. Normalize Features (Bifurcated)
         pm25_hist = None
         temporal_feats = []
         
         # Process ALL dynamic features (Weather + Derived + Emissions)
         temporal_list = [f for f in self.met_variables if f != 'cpm25'] + cfg_train.features.derived_variables + self.emi_variables
         for feat in temporal_list:
-            arr = (seq_raw[feat] - self.stats[feat]['median']) / self.stats[feat]['iqr']
+            if self.stats[feat].get('type') == 'minmax':
+                f_min = self.stats[feat]['min']
+                f_max = self.stats[feat]['max']
+                arr = (seq_raw[feat] - f_min) / (f_max - f_min)
+            else:
+                arr = (seq_raw[feat] - self.stats[feat]['median']) / self.stats[feat]['iqr']
             temporal_feats.append(arr)
             
-        # Get PM25
+        # Get PM25 (Always robust scaled)
         pm25_hist = (seq_raw['cpm25'] - self.stats['cpm25']['median']) / self.stats['cpm25']['iqr']
         pm25_hist = torch.from_numpy(pm25_hist).permute(1, 2, 0) # (140, 124, 10)
         

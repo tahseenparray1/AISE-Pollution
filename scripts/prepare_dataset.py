@@ -30,33 +30,33 @@ def load_raw_or_derived(feat, month):
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         
-        # --- NEW: UNMASK THE EMISSIONS ---
-        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-        if feat in emi_vars:
-            arr = arr * 1e6  # Scale up so the network can see it!
-            arr = np.log1p(arr) # Now log1p will actually work
-            return arr
-            
-        # Non-emission skewed features
+        # Only log-transform the skewed weather features, leave emissions raw!
         if feat in ['rain', 'pblh']: 
             arr = np.log1p(arr)
             
         return arr
 
 def compute_gridwise_robust_stats(features, months):
-    print("Calculating Grid-Wise Robust Statistics...")
+    print("Calculating Grid-Wise Statistics...")
     stats = {}
     for feat in tqdm(features, desc="Scanning features"):
         feat_data = [load_raw_or_derived(feat, month) for month in months]
         feat_data = np.concatenate(feat_data, axis=0)
         
-        median = np.median(feat_data, axis=0)
-        q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
-        clip_min = 5.0 if feat not in cfg.features.emission_variables_raw else 0.1
-        iqr = np.clip(q75 - q25, a_min=clip_min, a_max=None)
-        
-        stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32)}
-        
+        # --- NEW: BIFURCATED SCALING LOGIC ---
+        if feat in cfg.features.emission_variables_raw:
+            # Min-Max Scaling for sparse arrays
+            f_min = np.min(feat_data)
+            f_max = np.max(feat_data)
+            if f_max == f_min: f_max = f_min + 1e-5 # Prevent div by zero
+            stats[feat] = {'min': float(f_min), 'max': float(f_max), 'type': 'minmax'}
+        else:
+            # Robust Scaling for continuous weather
+            median = np.median(feat_data, axis=0)
+            q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
+            iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
+            stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32), 'type': 'robust'}
+            
     np.save(cfg.paths.stats_path, stats)
     return stats
 
@@ -72,7 +72,15 @@ def process_month(month_name):
     month_data = []
     for feat in all_features:
         arr = load_raw_or_derived(feat, month_name)
-        arr = (arr - global_stats[feat]["median"]) / global_stats[feat]["iqr"]
+        
+        # --- NEW: APPLY CORRECT SCALER ---
+        if global_stats[feat].get('type') == 'minmax':
+            f_min = global_stats[feat]['min']
+            f_max = global_stats[feat]['max']
+            arr = (arr - f_min) / (f_max - f_min)
+        else:
+            arr = (arr - global_stats[feat]["median"]) / global_stats[feat]["iqr"]
+            
         month_data.append(arr)
 
     total_hours = month_data[0].shape[0] 
