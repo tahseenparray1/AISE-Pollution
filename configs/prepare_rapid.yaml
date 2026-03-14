@@ -14,6 +14,6 @@ data:
 
 features:
   met_variables_raw:
-    ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+    ["cpm25", "t2", "u10", "v10", "swdown", "pblh"]
   emission_variables_raw:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
