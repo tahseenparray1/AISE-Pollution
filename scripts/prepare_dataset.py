@@ -6,7 +6,7 @@ from src.utils.config import load_config
 cfg = load_config("configs/prepare_rapid.yaml")
 RAW_PATH = cfg.paths.raw_path
 
-derived_features = ['wind_speed', 'vent_coef', 'rain_mask', 'photo_nox', 'photo_so2', 'photo_voc']
+derived_features = ['wind_speed', 'vent_coef', 'rain_mask']
 all_features = cfg.features.met_variables_raw + cfg.features.emission_variables_raw + derived_features
 
 def load_raw_or_derived(feat, month):
@@ -27,22 +27,6 @@ def load_raw_or_derived(feat, month):
         rain = np.load(os.path.join(RAW_PATH, month, "rain.npy")).astype(np.float32)
         return (rain > 0).astype(np.float32)
         
-    elif feat == 'photo_nox':
-        nox = np.load(os.path.join(RAW_PATH, month, "NOx.npy")).astype(np.float32)
-        swdown = np.load(os.path.join(RAW_PATH, month, "swdown.npy")).astype(np.float32)
-        return nox * swdown
-        
-    elif feat == 'photo_so2':
-        so2 = np.load(os.path.join(RAW_PATH, month, "SO2.npy")).astype(np.float32)
-        swdown = np.load(os.path.join(RAW_PATH, month, "swdown.npy")).astype(np.float32)
-        return so2 * swdown
-        
-    elif feat == 'photo_voc':
-        voc_f = np.load(os.path.join(RAW_PATH, month, "NMVOC_finn.npy")).astype(np.float32)
-        voc_e = np.load(os.path.join(RAW_PATH, month, "NMVOC_e.npy")).astype(np.float32)
-        swdown = np.load(os.path.join(RAW_PATH, month, "swdown.npy")).astype(np.float32)
-        return (voc_f + voc_e) * swdown
-        
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
         
@@ -60,7 +44,7 @@ def compute_gridwise_robust_stats(features, months):
         feat_data = np.concatenate(feat_data, axis=0)
         
         # --- NEW: BIFURCATED SCALING LOGIC ---
-        if feat in cfg.features.emission_variables_raw or feat.startswith('photo_'):
+        if feat in cfg.features.emission_variables_raw:
             # Min-Max Scaling for sparse arrays
             f_min = np.min(feat_data)
             f_max = np.max(feat_data)
