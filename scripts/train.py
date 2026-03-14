@@ -157,21 +157,14 @@ for ep in range(cfg.training.epochs):
         
         optimizer.zero_grad(set_to_none=True)
         
-        # Single Forward Pass (Direct Multi-Step)
         out = model(x)
         
         pred_phys = to_physical(out)
         targ_phys = to_physical(y)
         
-        # --- NEW LOSS FORMULATION ---
-        # 1. Direct Physical RMSE (Matches Kaggle Metric Exactly)
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
-        
-        # 2. Spatial Gradient Loss (Keeps plume edges sharp)
+        mse_loss = F.mse_loss(pred_phys, targ_phys)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-        
-        # 3. Blended Total Loss
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = mse_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
