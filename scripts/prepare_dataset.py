@@ -29,6 +29,14 @@ def load_raw_or_derived(feat, month):
         
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
+        
+        # --- EXP C FIX: The Telescope Scaler ---
+        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+        if feat in emi_vars:
+            arr = arr * 1e11
+            arr = np.log1p(arr)
+            return arr
+            
         if feat in ['rain', 'pblh']: 
             arr = np.log1p(arr)
         return arr
@@ -47,11 +55,7 @@ def compute_gridwise_robust_stats(features, months):
         else:
             median = np.median(feat_data, axis=0)
             q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
-            
-            # --- EXP B FIX: Change 5.0 to 0.5 (Keep 5.0 for q2) ---
-            clip_min = 5.0 if feat == 'q2' else 0.5
-            iqr = np.clip(q75 - q25, a_min=clip_min, a_max=None)
-            
+            iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
             stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32), 'type': 'robust'}
             
     np.save(cfg.paths.stats_path, stats)
