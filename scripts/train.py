@@ -41,9 +41,9 @@ def spatial_gradient_loss(pred_phys, target_phys):
     dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
     return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
 
-# Horizon weights: linear ramp from 1.0 to 3.0 across 16 future steps
-# Forces the model to pay 3x more attention to t+16 than t+1
-horizon_weights = torch.linspace(1.0, 3.0, cfg.data.time_out).to(device)
+# Horizon weights: gentle ramp from 1.0 to 1.5 across 16 future steps
+# Nudges model toward better distant forecasts without sacrificing early-hour accuracy
+horizon_weights = torch.linspace(1.0, 1.5, cfg.data.time_out).to(device)
 horizon_weights = horizon_weights / horizon_weights.mean()  # Normalize so total loss scale unchanged
 horizon_weights = horizon_weights.view(1, 1, 1, -1)  # (1, 1, 1, 16) for broadcasting
 
