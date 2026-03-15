@@ -148,7 +148,8 @@ class FNO2D(nn.Module):
         self.block2 = WNOBlock(self.width)
         self.block3 = WNOBlock(self.width)
         
-        self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
+        # The decoder must now accept 256 channels from WNO + 256 channels from the skip connection
+        self.fc1 = nn.Conv2d(self.width * 2, 128, kernel_size=1) 
         self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1) 
 
     def get_grid(self, b, nx, ny, device):
@@ -197,11 +198,13 @@ class FNO2D(nn.Module):
         x_wno = self.block2(x_wno)
         x_wno = self.block3(x_wno)
         
-        # Decode to DELTA (network learns the change from current state)
-        x_wno = self.fc1(x_wno)
-        
-        x_wno = F.gelu(x_wno)
-        out = self.fc2(x_wno) 
+        # --- THE SKIP CONNECTION ---
+        # Concatenate the original encoded features with the WNO spatial output
+        x_concat = torch.cat([x_wno, x_feat], dim=1) 
+
+        # Decode to DELTA
+        x_decode = F.gelu(self.fc1(x_concat))
+        out = self.fc2(x_decode) 
         
         # FIX #1: RESIDUAL CONNECTION
         # 'out' shape is (B, 16, H, W). 'last_pm25' shape is (B, 1, H, W).
