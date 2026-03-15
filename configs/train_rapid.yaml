@@ -29,7 +29,7 @@ model:
 
 training:
   batch_size: 16
-  epochs: 20
+  epochs: 50
   lr: 1e-3
   weight_decay: 1e-5
   checkpoint_every: 10
