@@ -29,16 +29,7 @@ def load_raw_or_derived(feat, month):
         
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
-        
-        # --- THE TELESCOPE SCALER ---
-        emi_vars = ["PM25", "NH3", "NOx", "NMVOC_e"]
-        if feat in emi_vars:
-            arr = arr * 1e11  # Bring the median up to ~1.0
-            arr = np.log1p(arr) # Compress the 6000x outliers
-            return arr
-            
-        # Non-emission skewed features
-        if feat in ['pblh']: 
+        if feat in ['rain', 'pblh']: 
             arr = np.log1p(arr)
         return arr
 
@@ -49,19 +40,14 @@ def compute_gridwise_robust_stats(features, months):
         feat_data = [load_raw_or_derived(feat, month) for month in months]
         feat_data = np.concatenate(feat_data, axis=0)
         
-        # --- NEW: BIFURCATED SCALING LOGIC ---
         if feat in cfg.features.emission_variables_raw:
-            # Min-Max Scaling for sparse arrays
-            f_min = np.min(feat_data)
-            f_max = np.max(feat_data)
-            if f_max == f_min: f_max = f_min + 1e-5 # Prevent div by zero
+            f_min, f_max = np.min(feat_data), np.max(feat_data)
+            if f_max == f_min: f_max = f_min + 1e-5
             stats[feat] = {'min': float(f_min), 'max': float(f_max), 'type': 'minmax'}
         else:
-            # Robust Scaling for continuous weather
             median = np.median(feat_data, axis=0)
             q75, q25 = np.percentile(feat_data, [75, 25], axis=0)
-            # Safe dynamic clipping
-            iqr = np.clip(q75 - q25, a_min=0.1, a_max=None)
+            iqr = np.clip(q75 - q25, a_min=5.0, a_max=None)
             stats[feat] = {'median': median.astype(np.float32), 'iqr': iqr.astype(np.float32), 'type': 'robust'}
             
     np.save(cfg.paths.stats_path, stats)

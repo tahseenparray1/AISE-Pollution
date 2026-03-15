@@ -63,9 +63,6 @@ class TestDataLoader(torch.utils.data.Dataset):
 
         self.N = self.arrs['cpm25'].shape[0]
 
-        # Explicitly load rain for rain_mask (rain is not in met_variables anymore)
-        self.rain_raw = np.load(os.path.join(cfg_infer.paths.input_loc, "rain.npy"), mmap_mode="r")
-
     def __len__(self):
         return self.N
 
@@ -81,22 +78,14 @@ class TestDataLoader(torch.utils.data.Dataset):
         # 2. Compute Derived Features
         ws = np.sqrt(seq_raw['u10']**2 + seq_raw['v10']**2)
         vc = np.log1p(ws * seq_raw['pblh'])
-        
-        # Explicit rain load
-        rain_slice = np.array(self.rain_raw[idx, :self.total_time], dtype=np.float32)
-        rm = (rain_slice > 0).astype(np.float32)
+        rm = (seq_raw['rain'] > 0).astype(np.float32)
         
         seq_raw['wind_speed'] = ws
         seq_raw['vent_coef'] = vc
         seq_raw['rain_mask'] = rm
         
-        # 3. Apply Pruned Log Transforms
-        emi_vars = ["PM25", "NH3", "NOx", "NMVOC_e"]
-        for feat in emi_vars:
-            if feat in seq_raw:
-                seq_raw[feat] = np.log1p(seq_raw[feat] * 1e11)
-                
-        skewed_features = ['pblh']
+        # 3. Apply Log Transforms
+        skewed_features = ['rain', 'pblh']
         for feat in skewed_features:
             if feat in seq_raw:
                 seq_raw[feat] = np.log1p(seq_raw[feat])
@@ -109,8 +98,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         temporal_list = [f for f in self.met_variables if f != 'cpm25'] + cfg_train.features.derived_variables + self.emi_variables
         for feat in temporal_list:
             if self.stats[feat].get('type') == 'minmax':
-                f_min = self.stats[feat]['min']
-                f_max = self.stats[feat]['max']
+                f_min, f_max = self.stats[feat]['min'], self.stats[feat]['max']
                 arr = (seq_raw[feat] - f_min) / (f_max - f_min)
             else:
                 arr = (seq_raw[feat] - self.stats[feat]['median']) / self.stats[feat]['iqr']
@@ -128,7 +116,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         # Topo
         topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
         
-        # Combine (10 + 312 + 1 = 323 Channels)
+        # Combine (10 + 442 + 1 = 453 Channels)
         x = torch.cat((pm25_hist, temporal_tensor, topo_tensor), dim=-1)
 
         return x
