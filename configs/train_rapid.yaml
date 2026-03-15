@@ -18,8 +18,8 @@ data:
   stride: 24
 
 features:
-  V: 18
-  met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+  V: 17
+  met_variables: ["cpm25", "t2", "u10", "v10", "swdown", "pblh", "rain"]
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
   derived_variables: ["wind_speed", "vent_coef", "rain_mask"]

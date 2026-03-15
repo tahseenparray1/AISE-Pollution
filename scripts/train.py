@@ -41,6 +41,12 @@ def spatial_gradient_loss(pred_phys, target_phys):
     dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
     return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
 
+# Horizon weights: linear ramp from 1.0 to 3.0 across 16 future steps
+# Forces the model to pay 3x more attention to t+16 than t+1
+horizon_weights = torch.linspace(1.0, 3.0, cfg.data.time_out).to(device)
+horizon_weights = horizon_weights / horizon_weights.mean()  # Normalize so total loss scale unchanged
+horizon_weights = horizon_weights.view(1, 1, 1, -1)  # (1, 1, 1, 16) for broadcasting
+
 # ==========================================
 # 3. DATA LOADER
 # ==========================================
@@ -88,7 +94,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # 3. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        # Combine (10 + 442 + 1 = 453 Channels)
+        # Combine (10 + 416 + 1 = 427 Channels)
         x = torch.cat((pm_hist, temporal_tensor, topo), dim=-1)
         
         # Target (uses same config-driven index as input)
@@ -158,6 +164,11 @@ for ep in range(cfg.training.epochs):
         
         mse_loss = F.mse_loss(pred_phys, targ_phys)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+        
+        # Horizon-weighted MSE: penalize distant forecast errors more heavily
+        weighted_sq_err = (pred_phys - targ_phys) ** 2 * horizon_weights
+        mse_loss = weighted_sq_err.mean()
+        
         total_loss = mse_loss + 0.1 * loss_grad
 
         

@@ -121,7 +121,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         # Topo
         topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
         
-        # Combine (10 + 442 + 1 = 453 Channels)
+        # Combine (10 + 416 + 1 = 427 Channels)
         x = torch.cat((pm25_hist, temporal_tensor, topo_tensor), dim=-1)
 
         return x
