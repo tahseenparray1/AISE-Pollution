@@ -34,18 +34,18 @@ pm_iqr_tensor = torch.tensor(stats['cpm25']['iqr'], dtype=torch.float32).to(devi
 def to_physical(x_norm):
     return (x_norm * pm_iqr_tensor) + pm_median_tensor
 
-def spatial_gradient_loss(pred_phys, target_phys):
+def spatiotemporal_gradient_loss(pred_phys, target_phys):
+    # 1. Spatial Gradients (dx, dy)
     dx_p = pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]
     dx_t = target_phys[:, 1:, :, :] - target_phys[:, :-1, :, :]
     dy_p = pred_phys[:, :, 1:, :] - pred_phys[:, :, :-1, :]
     dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
-    return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
-
-# Horizon weights: gentle ramp from 1.0 to 1.5 across 16 future steps
-# Nudges model toward better distant forecasts without sacrificing early-hour accuracy
-horizon_weights = torch.linspace(1.0, 1.5, cfg.data.time_out).to(device)
-horizon_weights = horizon_weights / horizon_weights.mean()  # Normalize so total loss scale unchanged
-horizon_weights = horizon_weights.view(1, 1, 1, -1)  # (1, 1, 1, 16) for broadcasting
+    
+    # 2. Temporal Gradients (dt)
+    dt_p = pred_phys[:, :, :, 1:] - pred_phys[:, :, :, :-1]
+    dt_t = target_phys[:, :, :, 1:] - target_phys[:, :, :, :-1]
+    
+    return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t) + F.l1_loss(dt_p, dt_t)
 
 # ==========================================
 # 3. DATA LOADER
@@ -163,12 +163,7 @@ for ep in range(cfg.training.epochs):
         targ_phys = to_physical(y)
         
         mse_loss = F.mse_loss(pred_phys, targ_phys)
-        loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-        
-        # Horizon-weighted MSE: penalize distant forecast errors more heavily
-        weighted_sq_err = (pred_phys - targ_phys) ** 2 * horizon_weights
-        mse_loss = weighted_sq_err.mean()
-        
+        loss_grad = spatiotemporal_gradient_loss(pred_phys, targ_phys)
         total_loss = mse_loss + 0.1 * loss_grad
 
         
