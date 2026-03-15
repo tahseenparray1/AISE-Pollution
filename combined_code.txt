@@ -19,8 +19,8 @@ data:
   S2: 124
 
 features:
-  V: 18
-  met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+  V: 17
+  met_variables: ["cpm25", "t2", "u10", "v10", "swdown", "pblh", "rain"]
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
   derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
@@ -46,7 +46,7 @@ data:
 
 features:
   met_variables_raw:
-    ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+    ["cpm25", "t2", "u10", "v10", "swdown", "pblh", "rain"]
   emission_variables_raw:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
 
@@ -67,7 +67,7 @@ data:
 
 features:
   met_variables_raw:
-    ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+    ["cpm25", "t2", "u10", "v10", "swdown", "pblh", "rain"]
   emission_variables_raw:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
 
@@ -92,8 +92,8 @@ data:
   stride: 4
 
 features:
-  V: 18
-  met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+  V: 17
+  met_variables: ["cpm25", "t2", "u10", "v10", "swdown", "pblh", "rain"]
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
   derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
@@ -132,8 +132,8 @@ data:
   stride: 24
 
 features:
-  V: 18
-  met_variables: ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+  V: 17
+  met_variables: ["cpm25", "t2", "u10", "v10", "swdown", "pblh", "rain"]
   emission_variables:
     ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
   derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
@@ -143,7 +143,7 @@ model:
 
 training:
   batch_size: 16
-  epochs: 20
+  epochs: 50
   lr: 1e-3
   weight_decay: 1e-5
   checkpoint_every: 10
@@ -387,6 +387,11 @@ class TestDataLoader(torch.utils.data.Dataset):
         seq_raw['rain_mask'] = rm
         
         # 3. Apply Log Transforms
+        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+        for feat in emi_vars:
+            if feat in seq_raw:
+                seq_raw[feat] = np.log1p(seq_raw[feat] * 1e11)
+                
         skewed_features = ['rain', 'pblh']
         for feat in skewed_features:
             if feat in seq_raw:
@@ -396,8 +401,8 @@ class TestDataLoader(torch.utils.data.Dataset):
         pm25_hist = None
         temporal_feats = []
         
-        # Process ALL dynamic features (Weather + Derived + Emissions)
-        temporal_list = [f for f in self.met_variables if f != 'cpm25'] + cfg_train.features.derived_variables + self.emi_variables
+        # Process ALL dynamic features (Weather + Emissions + Derived) to exactly match train.py order
+        temporal_list = [f for f in self.met_variables if f != 'cpm25'] + self.emi_variables + cfg_train.features.derived_variables
         for feat in temporal_list:
             if self.stats[feat].get('type') == 'minmax':
                 f_min, f_max = self.stats[feat]['min'], self.stats[feat]['max']
@@ -418,7 +423,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         # Topo
         topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
         
-        # Combine (10 + 442 + 1 = 453 Channels)
+        # Combine (10 + 416 + 1 = 427 Channels)
         x = torch.cat((pm25_hist, temporal_tensor, topo_tensor), dim=-1)
 
         return x
@@ -490,7 +495,7 @@ import numpy as np
 from tqdm import tqdm
 from src.utils.config import load_config
 
-cfg = load_config("configs/prepare_dataset.yaml")
+cfg = load_config("configs/prepare_rapid.yaml")
 RAW_PATH = cfg.paths.raw_path
 
 derived_features = ['wind_speed', 'vent_coef', 'rain_mask']
@@ -516,6 +521,14 @@ def load_raw_or_derived(feat, month):
         
     else:
         arr = np.load(os.path.join(RAW_PATH, month, f"{feat}.npy")).astype(np.float32)
+        
+        # --- EXP C FIX: The Telescope Scaler ---
+        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+        if feat in emi_vars:
+            arr = arr * 1e11
+            arr = np.log1p(arr)
+            return arr
+            
         if feat in ['rain', 'pblh']: 
             arr = np.log1p(arr)
         return arr
@@ -655,6 +668,12 @@ def spatial_gradient_loss(pred_phys, target_phys):
     dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
     return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
 
+# Horizon weights: gentle ramp from 1.0 to 1.5 across 16 future steps
+# Nudges model toward better distant forecasts without sacrificing early-hour accuracy
+horizon_weights = torch.linspace(1.0, 1.5, cfg.data.time_out).to(device)
+horizon_weights = horizon_weights / horizon_weights.mean()  # Normalize so total loss scale unchanged
+horizon_weights = horizon_weights.view(1, 1, 1, -1)  # (1, 1, 1, 16) for broadcasting
+
 # ==========================================
 # 3. DATA LOADER
 # ==========================================
@@ -702,7 +721,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # 3. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        # Combine (10 + 442 + 1 = 453 Channels)
+        # Combine (10 + 416 + 1 = 427 Channels)
         x = torch.cat((pm_hist, temporal_tensor, topo), dim=-1)
         
         # Target (uses same config-driven index as input)
@@ -772,6 +791,11 @@ for ep in range(cfg.training.epochs):
         
         mse_loss = F.mse_loss(pred_phys, targ_phys)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+        
+        # Horizon-weighted MSE: penalize distant forecast errors more heavily
+        weighted_sq_err = (pred_phys - targ_phys) ** 2 * horizon_weights
+        mse_loss = weighted_sq_err.mean()
+        
         total_loss = mse_loss + 0.1 * loss_grad
 
         
@@ -1015,12 +1039,18 @@ pm_iqr_tensor = torch.tensor(stats['cpm25']['iqr'], dtype=torch.float32).to(devi
 def to_physical(x_norm):
     return (x_norm * pm_iqr_tensor) + pm_median_tensor
 
-def spatial_gradient_loss(pred_phys, target_phys):
+def spatiotemporal_gradient_loss(pred_phys, target_phys):
+    # 1. Spatial Gradients (dx, dy)
     dx_p = pred_phys[:, 1:, :, :] - pred_phys[:, :-1, :, :]
     dx_t = target_phys[:, 1:, :, :] - target_phys[:, :-1, :, :]
     dy_p = pred_phys[:, :, 1:, :] - pred_phys[:, :, :-1, :]
     dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
-    return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
+    
+    # 2. Temporal Gradients (dt)
+    dt_p = pred_phys[:, :, :, 1:] - pred_phys[:, :, :, :-1]
+    dt_t = target_phys[:, :, :, 1:] - target_phys[:, :, :, :-1]
+    
+    return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t) + F.l1_loss(dt_p, dt_t)
 
 # ==========================================
 # 3. DATA LOADER
@@ -1067,7 +1097,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         # 3. Static Topography (1 channel)
         topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        # Combine (10 + 442 + 1 = 453 Channels)
+        # Combine (10 + 416 + 1 = 427 Channels)
         x = torch.cat((pm_hist, temporal_tensor, topo), dim=-1)
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
         return x, y
@@ -1127,7 +1157,7 @@ for ep in range(cfg.training.epochs):
         targ_phys = to_physical(y)
         
         mse_loss = F.mse_loss(pred_phys, targ_phys)
-        loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+        loss_grad = spatiotemporal_gradient_loss(pred_phys, targ_phys)
         total_loss = mse_loss + 0.1 * loss_grad
         
         with torch.no_grad():
