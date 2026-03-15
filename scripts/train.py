@@ -53,27 +53,6 @@ def spatial_gradient_loss(pred_phys, target_phys):
     dy_t = target_phys[:, :, 1:, :] - target_phys[:, :, :-1, :]
     return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
 
-def skewed_spatial_mse_loss(pred_norm, targ_norm, pred_phys, targ_phys, threshold=100.0, alpha=0.05, max_penalty=2.0):
-    # 1. Base MSE in safe normalized space
-    mse = (pred_norm - targ_norm) ** 2
-    weights = torch.ones_like(targ_norm)
-
-    # 2. Regional Focus: Force the model to care 3x more about the IGP
-    # Using the bounds from your telemetry logs: rows 60:90, cols 40:100
-    weights[:, 60:90, 40:100, :] *= 3.0
-
-    # 3. Hotspot Penalty: Exponentially penalize missing extreme peaks
-    under_mask = (targ_phys > threshold) & (pred_phys < targ_phys)
-    if under_mask.any():
-        error_phys = targ_phys[under_mask] - pred_phys[under_mask]
-        penalty = torch.exp(torch.clamp(alpha * error_phys, max=max_penalty))
-        weights[under_mask] *= penalty
-
-    # 4. Safe Normalization to prevent Float16/Float32 sum overflows
-    weights = weights / weights.sum()
-
-    return torch.sum(weights * mse)
-
 def log_layer_dynamics(model, epoch, grad_acc=None, num_steps=1):
     """ Logs the average absolute weight and gradient magnitude of major network blocks """
     logging.info(f"--- Epoch {epoch} Layer Dynamics (Mean L1 Norm) ---")
@@ -288,11 +267,12 @@ for ep in range(cfg.training.epochs):
         pred_phys = to_physical(out_f32)
         targ_phys = to_physical(y_f32)
         
-        # --- SPATIAL SKEWED LOSS ---
-        spatial_skewed_loss = skewed_spatial_mse_loss(out_f32, y_f32, pred_phys, targ_phys, threshold=100.0, alpha=0.05, max_penalty=2.0)
+        # --- WIDE HUBER LOSS ---
+        # Delta=50 forces aggressive MSE logic for errors up to 50 ug/m3
+        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=50.0) 
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
-        total_loss = spatial_skewed_loss + 0.1 * loss_grad
+        total_loss = huber_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
@@ -323,7 +303,7 @@ for ep in range(cfg.training.epochs):
                 f"Epoch {ep:02d} | Step {step:04d}/{len(train_loader)} | "
                 f"Time/Batch: {step_duration:.3f}s | "
                 f"Loss Total: {total_loss.item():.4f} | "
-                f"SpatialSkewed: {spatial_skewed_loss.item():.4f} | "
+                f"HuberLoss: {huber_loss.item():.4f} | "
                 f"Grad: {loss_grad.item():.4f} | "
                 f"GPU Mem: {mem_allocated:.1f}MB"
             )
@@ -351,7 +331,7 @@ for ep in range(cfg.training.epochs):
     high_pm_count = 0
     low_pm_count = 0
     
-    val_spatial_skewed_acc, val_grad_acc = 0.0, 0.0
+    val_huber_acc, val_grad_acc = 0.0, 0.0
     val_t1_mse_acc, val_t8_mse_acc, val_t16_mse_acc = 0.0, 0.0, 0.0
     val_igp_mse_acc, val_ocean_mse_acc = 0.0, 0.0
     val_max_pred, val_max_targ = 0.0, 0.0
@@ -376,7 +356,7 @@ for ep in range(cfg.training.epochs):
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             
             # Additive Loss Components
-            val_spatial_skewed_acc += skewed_spatial_mse_loss(out_f32, y_f32, pred_phys, targ_phys, threshold=100.0, alpha=0.05, max_penalty=2.0).item()
+            val_huber_acc += F.huber_loss(pred_phys, targ_phys, delta=50.0).item()
             val_grad_acc += spatial_gradient_loss(pred_phys, targ_phys).item()
             
             # Forecast Horizon Degradation
@@ -430,7 +410,7 @@ for ep in range(cfg.training.epochs):
     logging.info(f" [Where] IGP RMSE: {val_igp_rmse:.4f} | Ocean RMSE: {val_ocean_rmse:.4f}")
     logging.info(f" [Physics] Peak Capture Ratio: {peak_capture:.4f} (Pred Max: {val_max_pred:.1f} / Actual Max: {val_max_targ:.1f})")
     logging.info(f" [Arch] Gradient Flow Ratio (In/Out): {grad_ratio_avg:.6f}")
-    logging.info(f" [Loss] Val SpatialSkewedLoss: {(val_spatial_skewed_acc / len(val_loader)):.4f} | Val Grad: {(val_grad_acc / len(val_loader)):.4f}")
+    logging.info(f" [Loss] Val HuberLoss: {(val_huber_acc / len(val_loader)):.4f} | Val Grad: {(val_grad_acc / len(val_loader)):.4f}")
     logging.info("-------------------------------------")
 
     if val_rmse < best_val_rmse:
