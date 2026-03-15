@@ -99,8 +99,8 @@ class TestDataLoader(torch.utils.data.Dataset):
         pm25_hist = None
         temporal_feats = []
         
-        # Process ALL dynamic features (Weather + Derived + Emissions)
-        temporal_list = [f for f in self.met_variables if f != 'cpm25'] + cfg_train.features.derived_variables + self.emi_variables
+        # Process ALL dynamic features (Weather + Emissions + Derived) to exactly match train.py order
+        temporal_list = [f for f in self.met_variables if f != 'cpm25'] + self.emi_variables + cfg_train.features.derived_variables
         for feat in temporal_list:
             if self.stats[feat].get('type') == 'minmax':
                 f_min, f_max = self.stats[feat]['min'], self.stats[feat]['max']
