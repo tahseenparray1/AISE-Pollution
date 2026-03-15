@@ -236,14 +236,14 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.trai
 
 swa_model = AveragedModel(model)
 swa_start = int(cfg.training.epochs * 0.75)
-swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
+swa_scheduler = SWALR(optimizer, swa_lr=1e-4)
 
 # ==========================================
 # 5. TRAINING LOOP
 # ==========================================
 best_val_rmse = float('inf')
 log = []
-use_amp = (device.type == 'cuda')
+use_amp = False
 scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
 for ep in range(cfg.training.epochs):
@@ -293,15 +293,11 @@ for ep in range(cfg.training.epochs):
         pred_phys = to_physical(out_f32)
         targ_phys = to_physical(y_f32)
         
-        # --- REVISED LOSS FORMULATION ---
-        # We pass both normalized (for math) and physical (for masking)
-        skewed_loss = skewed_mse_loss(out_f32, y_f32, pred_phys, targ_phys, threshold=100.0, alpha=0.05, max_penalty=2.0)
+        # --- KAGGLE OPTIMIZED LOSS ---
+        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+        loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
-        # Calculate gradient loss on normalized space as well
-        loss_grad = spatial_gradient_loss(out_f32, y_f32)
-        
-        # 3. Blended Total Loss
-        total_loss = skewed_loss + 0.1 * loss_grad
+        total_loss = huber_loss + 0.1 * loss_grad
 
         
         with torch.no_grad():
@@ -332,7 +328,7 @@ for ep in range(cfg.training.epochs):
                 f"Epoch {ep:02d} | Step {step:04d}/{len(train_loader)} | "
                 f"Time/Batch: {step_duration:.3f}s | "
                 f"Loss Total: {total_loss.item():.4f} | "
-                f"SkewedMSE: {skewed_loss.item():.4f} | "
+                f"HuberLoss: {huber_loss.item():.4f} | "
                 f"Grad: {loss_grad.item():.4f} | "
                 f"GPU Mem: {mem_allocated:.1f}MB"
             )
@@ -360,7 +356,7 @@ for ep in range(cfg.training.epochs):
     high_pm_count = 0
     low_pm_count = 0
     
-    val_skewed_acc, val_grad_acc = 0.0, 0.0
+    val_huber_acc, val_grad_acc = 0.0, 0.0
     val_t1_mse_acc, val_t8_mse_acc, val_t16_mse_acc = 0.0, 0.0, 0.0
     val_igp_mse_acc, val_ocean_mse_acc = 0.0, 0.0
     val_max_pred, val_max_targ = 0.0, 0.0
@@ -384,9 +380,9 @@ for ep in range(cfg.training.epochs):
             # Global Validation Step
             val_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             
-            # Additive Loss Components - computed on normalized space!
-            val_skewed_acc += skewed_mse_loss(out_f32, y_f32, pred_phys, targ_phys, threshold=100.0, alpha=0.05, max_penalty=2.0).item()
-            val_grad_acc += spatial_gradient_loss(out_f32, y_f32).item()
+            # Additive Loss Components - computed on physical space!
+            val_huber_acc += F.huber_loss(pred_phys, targ_phys, delta=10.0).item()
+            val_grad_acc += spatial_gradient_loss(pred_phys, targ_phys).item()
             
             # Forecast Horizon Degradation
             val_t1_mse_acc += torch.mean((pred_phys_clipped[..., 0] - targ_phys[..., 0]) ** 2).item()
@@ -439,7 +435,7 @@ for ep in range(cfg.training.epochs):
     logging.info(f" [Where] IGP RMSE: {val_igp_rmse:.4f} | Ocean RMSE: {val_ocean_rmse:.4f}")
     logging.info(f" [Physics] Peak Capture Ratio: {peak_capture:.4f} (Pred Max: {val_max_pred:.1f} / Actual Max: {val_max_targ:.1f})")
     logging.info(f" [Arch] Gradient Flow Ratio (In/Out): {grad_ratio_avg:.6f}")
-    logging.info(f" [Loss] Val SkewedMSE: {(val_skewed_acc / len(val_loader)):.4f} | Val Grad: {(val_grad_acc / len(val_loader)):.4f}")
+    logging.info(f" [Loss] Val HuberLoss: {(val_huber_acc / len(val_loader)):.4f} | Val Grad: {(val_grad_acc / len(val_loader)):.4f}")
     logging.info("-------------------------------------")
 
     if val_rmse < best_val_rmse:
