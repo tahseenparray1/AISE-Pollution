@@ -3,6 +3,8 @@ import torch
 import numpy as np
 from tqdm import tqdm
 import warnings
+import gc
+import psutil
 
 from models.baseline_model import FNO2D
 from src.utils.config import load_config
@@ -20,6 +22,13 @@ np.random.seed(0)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+
+# Fix 1: Free everything from the training run
+torch.cuda.empty_cache()
+gc.collect()
+
+# Confirm memory freed
+print(f"RAM available: {psutil.virtual_memory().available / 1024**3:.1f} GB")
 
 # Load Grid-Wise Robust Stats 
 print("Loading grid-wise normalization stats...")
@@ -130,7 +139,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         return x
 
 test_dataset = TestDataLoader(cfg_infer, cfg_train, stats, topo_proxy)
-test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=4)
 
 # ==========================================
 # 3. MODEL INITIALIZATION
@@ -166,7 +175,13 @@ model.eval()
 # ==========================================
 # 4. INFERENCE LOOP
 # ==========================================
-prediction = np.zeros((len(test_dataset), cfg_train.data.S1, cfg_train.data.S2, cfg_train.data.time_out), dtype=np.float32)
+# Fix 3: Use memmap so it writes directly to disk
+out_file = os.path.join(cfg_infer.paths.output_loc, 'preds.npy')
+os.makedirs(cfg_infer.paths.output_loc, exist_ok=True)
+prediction = np.lib.format.open_memmap(
+    out_file, mode='w+', dtype=np.float32,
+    shape=(len(test_dataset), cfg_train.data.S1, cfg_train.data.S2, cfg_train.data.time_out)
+)
 
 print("Starting inference...")
 current_idx = 0
@@ -182,12 +197,7 @@ with torch.no_grad():
         prediction[current_idx : current_idx + bs] = out_real
         current_idx += bs
 
-# ==========================================
-# 5. EXPORT PREDICTIONS
-# ==========================================
-os.makedirs(cfg_infer.paths.output_loc, exist_ok=True)
-out_file = os.path.join(cfg_infer.paths.output_loc, 'preds.npy')
-
-np.save(out_file, prediction)
+# Replace np.save with:
+prediction.flush()
 print(f"Success! Predictions saved to: {out_file}")
-print(f"Final array shape: {prediction.shape}")
+print(f"Final array shape: {prediction.shape}")

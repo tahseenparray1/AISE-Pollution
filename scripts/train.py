@@ -451,3 +451,15 @@ for ep in range(cfg.training.epochs):
 
     log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})
     with open(cfg.paths.save_dir, 'w') as f: json.dump(log, f)
+
+# ==========================================
+# 6. MEMORY CLEANUP
+# ==========================================
+import gc
+logging.info("Training complete. Freeing memory...")
+torch.cuda.empty_cache()
+gc.collect()
+
+# Confirm memory freed
+import psutil
+print(f"RAM available: {psutil.virtual_memory().available / 1024**3:.1f} GB")
