@@ -101,18 +101,20 @@ class TestDataLoader(torch.utils.data.Dataset):
 
 test_dataset = TestDataLoader(cfg_infer, cfg_train, stats, topo_proxy)
 test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
-
 pm_channels = cfg_train.data.time_input
 num_temporal_features = (len(cfg_train.features.met_variables) - 1) + len(cfg_train.features.derived_variables) + len(cfg_train.features.emission_variables)
 temporal_channels = num_temporal_features * cfg_train.data.total_time 
 topo_channels = 1
 in_channels = pm_channels + temporal_channels + topo_channels
 
-print(f"Loading Ensemble Models...")
 SEEDS = [0, 42, 2026]
-models = []
+# Accumulator array for the ensemble sum
+prediction_sum = np.zeros((len(test_dataset), cfg_train.data.S1, cfg_train.data.S2, cfg_train.data.time_out), dtype=np.float32)
+
+print("Starting memory-safe sequential ensemble inference...")
 
 for seed in SEEDS:
+    print(f"\nLoading and running Model Seed {seed}...")
     model = FNO2D(
         in_channels=in_channels,
         time_out=cfg_train.data.time_out,
@@ -126,32 +128,30 @@ for seed in SEEDS:
     clean_state_dict = {k.replace('module.', ''): v for k, v in checkpoint['model_state_dict'].items() if k != 'n_averaged'}
     model.load_state_dict(clean_state_dict)
     model.eval()
-    models.append(model)
-    print(f"  - Loaded seed {seed}")
 
-prediction = np.zeros((len(test_dataset), cfg_train.data.S1, cfg_train.data.S2, cfg_train.data.time_out), dtype=np.float32)
-
-print("Starting ensemble inference...")
-current_idx = 0
-
-with torch.no_grad():
-    for x in tqdm(test_loader):
-        x = x.to(device, non_blocking=True)
-        bs = x.size(0)
-        
-        # Aggregate predictions from all models
-        ensemble_out = 0
-        for model in models:
-            ensemble_out += model(x)
+    current_idx = 0
+    with torch.no_grad():
+        for x in tqdm(test_loader):
+            x = x.to(device, non_blocking=True)
+            bs = x.size(0)
             
-        ensemble_out = ensemble_out / len(models)
-        
-        out_real = denorm(ensemble_out.cpu().numpy())
-        prediction[current_idx : current_idx + bs] = np.clip(out_real, 0, None)
-        current_idx += bs
+            out = model(x)
+            out_real = denorm(out.cpu().numpy())
+            
+            # Clip physics bounds and add directly to accumulator
+            prediction_sum[current_idx : current_idx + bs] += np.clip(out_real, 0, None)
+            current_idx += bs
+            
+    # --- MEMORY SAFETY FIX ---
+    # Wipe the model from VRAM before loading the next one
+    del model
+    torch.cuda.empty_cache()
+
+# Calculate the final ensemble average
+final_prediction = prediction_sum / len(SEEDS)
 
 os.makedirs(cfg_infer.paths.output_loc, exist_ok=True)
 out_file = os.path.join(cfg_infer.paths.output_loc, 'preds.npy')
 
-np.save(out_file, prediction)
-print(f"Success! Ensemble predictions saved to: {out_file}")
+np.save(out_file, final_prediction)
+print(f"\nSuccess! Final ensemble predictions saved to: {out_file}")

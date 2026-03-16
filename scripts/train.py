@@ -74,6 +74,7 @@ topo_channels = 1
 in_channels = pm_channels + temporal_channels + topo_channels
 
 # --- MULTI-SEED ENSEMBLE TRAINING LOOP ---
+# --- MULTI-SEED ENSEMBLE TRAINING LOOP ---
 SEEDS = [0, 42, 2026] # 3 models for ensembling
 
 for seed in SEEDS:
@@ -143,3 +144,8 @@ for seed in SEEDS:
     save_path = cfg.paths.model_save_path.replace(".pt", f"_seed{seed}.pt")
     torch.save({'model_state_dict': swa_model.state_dict()}, save_path)
     print(f"Saved ensemble member to: {save_path}")
+    
+    # --- MEMORY SAFETY FIX ---
+    # Delete objects and flush GPU memory before the next seed starts
+    del model, optimizer, scheduler, swa_model, swa_scheduler
+    torch.cuda.empty_cache()
