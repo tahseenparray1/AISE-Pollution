@@ -49,6 +49,7 @@ class TestDataLoader(torch.utils.data.Dataset):
 
         self.met_variables = cfg_train.features.met_variables
         self.emi_variables = cfg_train.features.emission_variables
+        self.derived_variables = cfg_train.features.derived_variables
 
         self.stats      = stats_dict
         self.topo_proxy = topo_proxy
@@ -91,7 +92,7 @@ class TestDataLoader(torch.utils.data.Dataset):
 
         temporal_list = (
             [f for f in self.met_variables if f != 'cpm25']
-            + cfg_train.features.derived_variables
+            + self.derived_variables
         )
 
         temporal_feats = []

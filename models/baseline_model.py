@@ -2,13 +2,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import math
+
 class HaarWavelet2D(nn.Module):
     """ Native PyTorch 2D Haar Discrete Wavelet Transform """
     def __init__(self, in_channels):
         super().__init__()
         # Haar wavelet filters: Low-Low, Low-High, High-Low, High-High
-        h0 = [1/2, 1/2]
-        h1 = [-1/2, 1/2]
+        s = 1 / math.sqrt(2)
+        h0 = [s, s]
+        h1 = [-s, s]
         
         # Create 2D filters via outer product
         ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
@@ -28,8 +31,9 @@ class InverseHaarWavelet2D(nn.Module):
     """ Native PyTorch 2D Inverse Haar Wavelet Transform """
     def __init__(self, in_channels):
         super().__init__()
-        h0 = [1.0, 1.0]
-        h1 = [-1.0, 1.0]
+        s = 1 / math.sqrt(2)
+        h0 = [s, s]
+        h1 = [-s, s]
         
         ll = torch.tensor([[h0[0]*h0[0], h0[0]*h0[1]], [h0[1]*h0[0], h0[1]*h0[1]]])
         lh = torch.tensor([[h1[0]*h0[0], h1[0]*h0[1]], [h1[1]*h0[0], h1[1]*h0[1]]])
@@ -193,9 +197,17 @@ class FNO2D(nn.Module):
         
         # WNO Spatial Mixing (No padding needed, 140 and 124 divide evenly by 2!)
         x_wno = self.block0(x_feat)
+        x_wno = F.dropout(x_wno, p=0.1, training=self.training)
+        
         x_wno = self.block1(x_wno)
+        x_wno = F.dropout(x_wno, p=0.1, training=self.training)
+        
         x_wno = self.block2(x_wno)
-        x_wno = self.block3(x_wno)
+        x_wno = F.dropout(x_wno, p=0.1, training=self.training)
+        
+        # Add residual skip connection from encoder directly to block3 to combat gradient starvation
+        x_wno = self.block3(x_wno + x_feat)
+        x_wno = F.dropout(x_wno, p=0.1, training=self.training)
         
         # Decode to DELTA (network learns the change from current state)
         x_wno = self.fc1(x_wno)

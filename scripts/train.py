@@ -235,7 +235,7 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.trai
 
 
 swa_model = AveragedModel(model)
-swa_start = int(cfg.training.epochs * 0.75)
+swa_start = int(cfg.training.epochs * 0.50)
 swa_scheduler = SWALR(optimizer, swa_lr=1e-4)
 
 # ==========================================
@@ -294,10 +294,10 @@ for ep in range(cfg.training.epochs):
         targ_phys = to_physical(y_f32)
         
         # --- KAGGLE OPTIMIZED LOSS ---
-        huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+        skewed = skewed_mse_loss(out_f32, y_f32, pred_phys, targ_phys)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
         
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = skewed + 0.1 * loss_grad
 
         
         with torch.no_grad():
@@ -328,7 +328,7 @@ for ep in range(cfg.training.epochs):
                 f"Epoch {ep:02d} | Step {step:04d}/{len(train_loader)} | "
                 f"Time/Batch: {step_duration:.3f}s | "
                 f"Loss Total: {total_loss.item():.4f} | "
-                f"HuberLoss: {huber_loss.item():.4f} | "
+                f"SkewedLoss: {skewed.item():.4f} | "
                 f"Grad: {loss_grad.item():.4f} | "
                 f"GPU Mem: {mem_allocated:.1f}MB"
             )
@@ -440,11 +440,18 @@ for ep in range(cfg.training.epochs):
 
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
+        best_epoch = ep
         if cfg.training.save_checkpoint:
             # Save the currently evaluating model's dict (which will be SWA if active)
             torch.save({'model_state_dict': eval_model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
         best_msg = f"  -> New Best Val RMSE: {best_val_rmse:.4f}"
         logging.info(best_msg)
+        
+    if getattr(cfg.training, 'early_stopping', False):
+        patience = 10
+        if 'best_epoch' in locals() and ep - best_epoch > patience:
+            logging.info(f"Early stopping triggered at epoch {ep} (No improvement for {patience} epochs)")
+            break
 
     log.append({"epoch": ep, "train_rmse": train_rmse, "val_rmse": val_rmse})
     with open(cfg.paths.save_dir, 'w') as f: json.dump(log, f)
