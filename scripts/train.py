@@ -89,7 +89,7 @@ def log_layer_dynamics(model, epoch, grad_acc=None, num_steps=1):
         'WNO Block 0': 'block0',
         'WNO Block 1': 'block1',
         'WNO Block 2': 'block2',
-        'WNO Block 3': 'block3',
+
         'Output FC1': 'fc1',
         'Output FC2': 'fc2'
     }
@@ -146,7 +146,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
                           if f in cfg.features.emission_variables]
         # Topography is no longer embedded in train_data to prevent bloat.
         topo_path = cfg.paths.topo_path
-        self.topo_proxy = np.load(topo_path)
+        self.topo_proxy = torch.from_numpy(np.load(topo_path).astype(np.float32))
 
     def __len__(self): 
         return len(self.valid_starts)
@@ -171,7 +171,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         ], dim=-1)
         
         # 4. Static Topography (1 channel)
-        topo = torch.from_numpy(self.topo_proxy).unsqueeze(-1)
+        topo = self.topo_proxy.unsqueeze(-1)
         
         # Combine everything (10 + 260 + 21 + 1 = 292 Channels)
         x = torch.cat((pm_hist, temporal_weather, static_emissions, topo), dim=-1)
@@ -243,7 +243,7 @@ swa_scheduler = SWALR(optimizer, swa_lr=1e-4)
 # ==========================================
 best_val_rmse = float('inf')
 log = []
-use_amp = False
+use_amp = True
 scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
 for ep in range(cfg.training.epochs):
@@ -296,8 +296,9 @@ for ep in range(cfg.training.epochs):
         # --- KAGGLE OPTIMIZED LOSS ---
         huber_loss = F.huber_loss(pred_phys, targ_phys, delta=10.0)
         loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+        loss_skew = skewed_mse_loss(out_f32, y_f32, pred_phys, targ_phys)
         
-        total_loss = huber_loss + 0.1 * loss_grad
+        total_loss = huber_loss + 0.1 * loss_grad + 0.05 * loss_skew
 
         
         with torch.no_grad():
@@ -441,7 +442,9 @@ for ep in range(cfg.training.epochs):
     if val_rmse < best_val_rmse:
         best_val_rmse = val_rmse
         if cfg.training.save_checkpoint:
-            # Save the currently evaluating model's dict (which will be SWA if active)
+            # Update BN stats for SWA model before saving
+            if ep >= swa_start:
+                torch.optim.swa_utils.update_bn(train_loader, swa_model, device=device)
             torch.save({'model_state_dict': eval_model.state_dict()}, cfg.paths.model_save_path.replace(".pt", "_best.pt"))
         best_msg = f"  -> New Best Val RMSE: {best_val_rmse:.4f}"
         logging.info(best_msg)

@@ -146,7 +146,6 @@ class FNO2D(nn.Module):
         self.block0 = WNOBlock(self.width)
         self.block1 = WNOBlock(self.width)
         self.block2 = WNOBlock(self.width)
-        self.block3 = WNOBlock(self.width)
         
         self.fc1 = nn.Conv2d(self.width, 128, kernel_size=1)
         self.fc2 = nn.Conv2d(128, self.time_out, kernel_size=1) 
@@ -191,11 +190,10 @@ class FNO2D(nn.Module):
         
         x_feat = self.input_encoder(x_in)
         
-        # WNO Spatial Mixing (No padding needed, 140 and 124 divide evenly by 2!)
+        # WNO Spatial Mixing (3 blocks: 140→70→35 divides cleanly for 2 DWT levels)
         x_wno = self.block0(x_feat)
         x_wno = self.block1(x_wno)
         x_wno = self.block2(x_wno)
-        x_wno = self.block3(x_wno)
         
         # Decode to DELTA (network learns the change from current state)
         x_wno = self.fc1(x_wno)
