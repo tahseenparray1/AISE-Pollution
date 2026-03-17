@@ -319,10 +319,11 @@ for ep in range(cfg.training.epochs):
             pred_clipped   = F.relu(pred_phys.detach())
             train_mse_acc += torch.mean((pred_clipped - targ_phys) ** 2).item()
 
-        grad_out = model.fc2.weight.grad.abs().mean().item() \
-            if model.fc2.weight.grad is not None else 0.0
-        grad_in  = model.input_encoder[0].weight.grad.abs().mean().item() \
-            if model.input_encoder[0].weight.grad is not None else 0.0
+        _base    = model.module if isinstance(model, torch.nn.DataParallel) else model
+        grad_out = _base.fc2.weight.grad.abs().mean().item() \
+            if _base.fc2.weight.grad is not None else 0.0
+        grad_in  = _base.input_encoder[0].weight.grad.abs().mean().item() \
+            if _base.input_encoder[0].weight.grad is not None else 0.0
         grad_ratio_acc += grad_in / (grad_out + 1e-8)
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
