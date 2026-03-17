@@ -231,9 +231,17 @@ model = FNO2D(
 total_params = sum(p.numel() for p in model.parameters())
 logging.info(f"Total parameters: {total_params:,}")
 
-optimizer = Adam(model.parameters(),
-                 lr=float(cfg.training.lr),
-                 weight_decay=float(cfg.training.weight_decay))
+# Fix 2: zero weight_decay for WNO blocks — their gradients (~0.0004) were being
+# eroded by decay at 1e-4 × weight (~0.01) = 1e-6/step. With 1760 steps, Block0
+# shrank from 0.129 → 0.104. Input/output encoders keep weight_decay (20× higher
+# gradients, actual overfitting risk).
+wno_params   = [p for n, p in model.named_parameters() if 'block' in n]
+other_params = [p for n, p in model.named_parameters() if 'block' not in n]
+
+optimizer = Adam([
+    {'params': wno_params,   'lr': float(cfg.training.lr), 'weight_decay': 0.0},
+    {'params': other_params, 'lr': float(cfg.training.lr), 'weight_decay': float(cfg.training.weight_decay)},
+])
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
 
@@ -283,41 +291,25 @@ for ep in range(cfg.training.epochs):
 
         optimizer.zero_grad(set_to_none=True)
 
-        # --- Chunk 1 forward ---
-        out_chunk1   = model(x)
-        pred_c1_norm = out_chunk1[..., :8].float()
-        pred_c1_phys = to_physical(pred_c1_norm)
-        targ_c1_phys = to_physical(y[..., :8].float())
+        # Fix 3: single-pass training — chunked rollout fed corrupt chunk1 predictions
+        # (RMSE ~24 at epoch 0) as PM history, breaking the residual connection and
+        # costing ~1.4 val RMSE. infer.py keeps chunked rollout for inference-time coverage.
+        out       = model(x)
+        pred_phys = to_physical(out.float())
+        targ_phys = to_physical(y.float())
+        out_norm  = out.float()
 
-        # Backward chunk 1 IMMEDIATELY — frees ~2.5 GB of activations before chunk 2 forward
-        huber1 = F.huber_loss(pred_c1_phys, targ_c1_phys, delta=25.0)
-        grad1  = spatial_gradient_loss(pred_c1_phys, targ_c1_phys)
-        (huber1 + 0.1 * grad1).backward()     # gradients accumulate in .grad
-
-        # --- Chunk 2 forward (chunk 1 activation graph is now freed) ---
-        x2 = x.clone()
-        x2[..., 2:10] = pred_c1_norm.detach()   # already detached from freed graph
-
-        out_chunk2   = model(x2)
-        pred_c2_norm = out_chunk2[..., :8].float()
-        pred_c2_phys = to_physical(pred_c2_norm)
-        targ_c2_phys = to_physical(y[..., 8:16].float())
-
-        # Combined tensors: chunk1 detached so only chunk2 parameters receive gradient here
-        pred_phys_all = torch.cat([pred_c1_phys.detach(), pred_c2_phys], dim=-1)
-        targ_phys_all = torch.cat([targ_c1_phys,          targ_c2_phys], dim=-1)
-        out_norm_all  = torch.cat([pred_c1_norm.detach(),  pred_c2_norm], dim=-1)
-
-        huber2      = F.huber_loss(pred_c2_phys, targ_c2_phys, delta=25.0)
-        grad2       = spatial_gradient_loss(pred_phys_all, targ_phys_all)
+        huber_loss  = F.huber_loss(pred_phys, targ_phys, delta=25.0)
+        loss_grad   = spatial_gradient_loss(pred_phys, targ_phys)
         skewed_loss = skewed_mse_loss(
-            out_norm_all, y.float(), pred_phys_all, targ_phys_all,
+            out_norm, y.float(), pred_phys, targ_phys,
             threshold=100.0, alpha=0.05, max_penalty=2.0)
-        (huber2 + 0.1 * grad2 + 2.0 * skewed_loss).backward()   # accumulates onto chunk1 grads
+        total_loss  = huber_loss + 0.1 * loss_grad + 2.0 * skewed_loss
+        total_loss.backward()
 
         with torch.no_grad():
-            pred_clipped   = F.relu(pred_phys_all.detach())
-            train_mse_acc += torch.mean((pred_clipped - targ_phys_all) ** 2).item()
+            pred_clipped   = F.relu(pred_phys.detach())
+            train_mse_acc += torch.mean((pred_clipped - targ_phys) ** 2).item()
 
         grad_out = model.fc2.weight.grad.abs().mean().item() \
             if model.fc2.weight.grad is not None else 0.0
@@ -325,7 +317,6 @@ for ep in range(cfg.training.epochs):
             if model.input_encoder[0].weight.grad is not None else 0.0
         grad_ratio_acc += grad_in / (grad_out + 1e-8)
 
-        # USE_AMP=False so GradScaler is a no-op; simplified to direct norm+step
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
@@ -339,13 +330,13 @@ for ep in range(cfg.training.epochs):
         if step % 20 == 0:
             mem = torch.cuda.memory_allocated(device) / 1024 ** 2 \
                 if torch.cuda.is_available() else 0
-            total_huber = huber1.item() + huber2.item()
             logging.info(
                 f"Ep {ep:02d} | Step {step:04d}/{len(train_loader)} | "
                 f"{time.time()-step_start:.2f}s | "
-                f"Huber {total_huber:.4f} | "
-                f"Grad {grad2.item():.4f} | "
-                f"Skewed {skewed_loss.item():.4f} | "
+                f"Loss {total_loss.item():.4f} "
+                f"(Huber {huber_loss.item():.4f} | "
+                f"Grad {loss_grad.item():.4f} | "
+                f"Skewed {skewed_loss.item():.4f}) | "
                 f"GPU {mem:.0f}MB")
 
     # FIX Bug #8: only log layer dynamics every LOG_DYNAMICS_EVERY epochs
@@ -372,13 +363,9 @@ for ep in range(cfg.training.epochs):
     with torch.no_grad():
         for x, y in val_loader:
             x, y = x.to(device), y.to(device)
-            # Bug 1 fix: val loop uses same two-chunk rollout as training/inference
-            yf = y.float()
-            out_c1 = eval_model(x).float()
-            x2_val = x.clone()
-            x2_val[..., 2:10] = out_c1[..., :8]
-            out_c2 = eval_model(x2_val).float()
-            out = torch.cat([out_c1[..., :8], out_c2[..., :8]], dim=-1)
+            # Fix 3: val loop reverts to single-pass to match training distribution
+            yf           = y.float()
+            out          = eval_model(x).float()
             pred_phys    = to_physical(out)
             targ_phys    = to_physical(yf)
             pred_clipped = F.relu(pred_phys)

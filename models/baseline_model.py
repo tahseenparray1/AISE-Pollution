@@ -193,10 +193,13 @@ class FNO2D(nn.Module):
         temporal_flat = temporal.permute(0, 1, 2, 4, 3).reshape(
             b * nx * ny, self.num_temporal_features, self.total_time
         )
-        # Fix 1a: run TemporalEncoder in float32 even inside AMP; prevents
-        # the massive fp16 backward graph that poisons WNO block gradients.
-        with torch.autocast(device_type=temporal_flat.device.type, enabled=False):
+        # Fix 1: Detach TE from the main backward graph entirely.
+        # The TE processes B*H*W=277,760 items vs WNO's B=16 — its backward was
+        # consuming ~25× more gradient budget than WNO blocks. torch.no_grad() stops
+        # the backward graph from ever being built through the TE.
+        with torch.no_grad():
             temporal_encoded = self.temporal_encoder(temporal_flat.float())  # (B*H*W, 32)
+        temporal_encoded = temporal_encoded.detach()
         temporal_encoded = temporal_encoded.reshape(b, nx, ny, 32)
 
         x_new = torch.cat([pm, temporal_encoded, static_topo], dim=-1)  # (B, H, W, 64)
