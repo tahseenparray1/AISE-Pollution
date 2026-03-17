@@ -15,10 +15,15 @@ Changes vs original V2:
   FIX (Bug #8): log_layer_dynamics ran every epoch (200 full param
                 scans for 100 epochs).  Now runs every LOG_DYNAMICS_EVERY
                 epochs (default 10).
+  Bottleneck 1c: nan-safe gradient accumulator.
+  Bottleneck 2a: skewed loss weight raised 0.5 -> 2.0.
+  Bottleneck 2b: Huber delta raised 10 -> 25 in training + val loops.
+  Bottleneck 3:  two-chunk rollout in training loop.
 """
 
 import os
 import sys
+import math
 import time
 import json
 import logging
@@ -280,21 +285,45 @@ for ep in range(cfg.training.epochs):
 
         # FIX Bug #5: clean AMP block — no spurious .float() casts needed
         with torch.autocast(device_type=device.type, dtype=torch.float32, enabled=USE_AMP):
-            out = model(x)
+            # --- Chunk 1: predict steps 0..7 ---
+            out_chunk1 = model(x)                         # (B, H, W, 16)
 
-        pred_phys = to_physical(out.float())
-        targ_phys = to_physical(y.float())
+        pred_chunk1_norm = out_chunk1[..., :8]            # normalised
+        pred_chunk1_phys = to_physical(pred_chunk1_norm.float())
+        targ_chunk1_phys = to_physical(y[..., :8].float())
+
+        # --- Build second-pass input: slide PM2.5 window forward ---
+        # x layout: [pm_hist(10), temporal(T*F), static, topo]
+        # Replace channels 2..9 of pm_hist with chunk1 preds (norm space)
+        x2 = x.clone()
+        x2[..., 2:10] = pred_chunk1_norm[..., :8].detach()
+
+        with torch.autocast(device_type=device.type, dtype=torch.float32, enabled=USE_AMP):
+            # --- Chunk 2: predict steps 8..15 with feedback ---
+            out_chunk2 = model(x2)                        # (B, H, W, 16)
+
+        pred_chunk2_phys = to_physical(out_chunk2[..., :8].float())
+        targ_chunk2_phys = to_physical(y[..., 8:16].float())
+
+        # --- Concatenate for shared loss ops ---
+        pred_phys = torch.cat([pred_chunk1_phys, pred_chunk2_phys], dim=-1)
+        targ_phys = torch.cat([targ_chunk1_phys, targ_chunk2_phys], dim=-1)
+        # Bug 2 fix: steps 8-15 should use chunk2 predictions, not chunk1
+        out_norm = torch.cat([out_chunk1[..., :8], out_chunk2[..., :8]], dim=-1).float()
 
         # --- Loss ---
-        huber_loss  = F.huber_loss(pred_phys, targ_phys, delta=10.0)
+        # Fix 2b: Huber delta 10 -> 25 (wider quadratic bowl = stronger signal on large errors)
+        huber_loss  = (F.huber_loss(pred_chunk1_phys, targ_chunk1_phys, delta=25.0) +
+                       F.huber_loss(pred_chunk2_phys, targ_chunk2_phys, delta=25.0))
         loss_grad   = spatial_gradient_loss(pred_phys, targ_phys)
 
         # FIX Bug #1: skewed_mse_loss is now actually used
+        # Fix 2a: weight raised 0.5 -> 2.0 so skewed penalty is same order-of-magnitude as Huber
         skewed_loss = skewed_mse_loss(
-            out.float(), y.float(), pred_phys, targ_phys,
+            out_norm, y.float(), pred_phys, targ_phys,
             threshold=100.0, alpha=0.05, max_penalty=2.0)
 
-        total_loss = huber_loss + 0.1 * loss_grad + 0.5 * skewed_loss
+        total_loss = huber_loss + 0.1 * loss_grad + 2.0 * skewed_loss
 
         with torch.no_grad():
             pred_clipped   = F.relu(pred_phys.detach())
@@ -315,7 +344,10 @@ for ep in range(cfg.training.epochs):
 
         for name, param in model.named_parameters():
             if param.requires_grad and param.grad is not None:
-                grad_acc[name] += param.grad.abs().mean().item()
+                # Fix 1c: nan-safe gradient accumulator
+                v = param.grad.abs().mean().item()
+                if math.isfinite(v):
+                    grad_acc[name] += v
 
         if step % 20 == 0:
             mem = torch.cuda.memory_allocated(device) / 1024 ** 2 \
@@ -353,15 +385,20 @@ for ep in range(cfg.training.epochs):
     with torch.no_grad():
         for x, y in val_loader:
             x, y = x.to(device), y.to(device)
-            out  = eval_model(x).float()
-            yf   = y.float()
-
+            # Bug 1 fix: val loop uses same two-chunk rollout as training/inference
+            yf = y.float()
+            out_c1 = eval_model(x).float()
+            x2_val = x.clone()
+            x2_val[..., 2:10] = out_c1[..., :8]
+            out_c2 = eval_model(x2_val).float()
+            out = torch.cat([out_c1[..., :8], out_c2[..., :8]], dim=-1)
             pred_phys    = to_physical(out)
             targ_phys    = to_physical(yf)
             pred_clipped = F.relu(pred_phys)
 
             val_mse_acc   += torch.mean((pred_clipped - targ_phys) ** 2).item()
-            val_huber_acc += F.huber_loss(pred_phys, targ_phys, delta=10.0).item()
+            # Fix 2b: same delta as training loop
+            val_huber_acc += F.huber_loss(pred_phys, targ_phys, delta=25.0).item()
             val_grad_acc  += spatial_gradient_loss(pred_phys, targ_phys).item()
 
             val_t1  += torch.mean((pred_clipped[..., 0]  - targ_phys[..., 0])  ** 2).item()

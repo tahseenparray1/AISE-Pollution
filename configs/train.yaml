@@ -33,7 +33,7 @@ training:
   batch_size:        16
   epochs:            100
   lr:                1e-3
-  weight_decay:      1e-5
+  weight_decay:      1e-4   # Fix 4b: raise weight decay 1e-5->1e-4 for meaningful regularisation
   checkpoint_every:  10
   save_checkpoint:   True
   early_stopping:    False

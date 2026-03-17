@@ -10,6 +10,8 @@ Changes vs original V2:
                 prepare_dataset.py so train/infer normalization is
                 consistent.
   FIX (Bug #7): pin_memory=True added to test DataLoader.
+  Bottleneck 3:  two-chunk rollout to match training loop;
+                 T+9..T+16 now sees predicted T+1..T+8 as context.
 """
 
 import os
@@ -210,8 +212,24 @@ with torch.no_grad():
         x  = x.to(device, non_blocking=True)
         bs = x.size(0)
 
-        out      = model(x)
-        out_real = denorm(out.cpu().numpy())
+        # --- Bottleneck 3: two-chunk rollout ---
+        # Chunk 1: model predicts all 16 steps; we use first 8 (T+1..T+8)
+        out_chunk1 = model(x)                          # (B, H, W, 16)
+        pred_chunk1_norm = out_chunk1[..., :8]         # normalised T+1..T+8
+
+        # Build second-pass input: slide PM2.5 history window
+        # x layout: [pm_hist(10), temporal(T*F), static, topo]
+        # Replace channels 2..9 with T+1..T+8 predictions in norm space
+        x2 = x.clone()
+        x2[..., 2:10] = pred_chunk1_norm
+
+        # Chunk 2: model predicts T+9..T+16 with feedback from chunk 1
+        out_chunk2 = model(x2)                         # (B, H, W, 16)
+        pred_chunk2_norm = out_chunk2[..., :8]         # normalised T+9..T+16
+
+        # Combine and denormalise
+        out_norm = torch.cat([pred_chunk1_norm, pred_chunk2_norm], dim=-1)  # (B, H, W, 16)
+        out_real = denorm(out_norm.cpu().numpy())
 
         # FIX Bug #2: clip to non-negative — PM2.5 is physically bounded at 0
         prediction[current_idx : current_idx + bs] = np.clip(out_real, 0, None)

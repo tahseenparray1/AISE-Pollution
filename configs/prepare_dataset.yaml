@@ -8,7 +8,7 @@ paths:
 data:
   months: ["APRIL_16", "JULY_16", "OCT_16", "DEC_16"]
   horizon: 26
-  stride:  4
+  stride:  3   # Warning 1 fix: stride=2 risks ~152GB disk; stride=3 gives ~101GB, still ~33% more samples
   val_frac: 0.2
   seed:    0
 

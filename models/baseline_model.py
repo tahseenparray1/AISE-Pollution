@@ -143,7 +143,7 @@ class FNO2D(nn.Module):
 
         self.temporal_encoder = TemporalEncoder(
             in_features=num_temporal_features,
-            hidden_dim=32,
+            hidden_dim=16,    # Fix 1b: halve hidden_dim 32→16, reduces TE backward footprint 4×
             out_features=32,
             total_time=total_time,
         )
@@ -158,7 +158,7 @@ class FNO2D(nn.Module):
             nn.Conv2d(new_in_channels + 2, width, kernel_size=1),  # +2 for grid coords
             nn.GroupNorm(4, width),
             nn.GELU(),
-            nn.Dropout(p=0.20),
+            nn.Dropout(p=0.30),   # Fix 4c: raise dropout 0.20→0.30 for better regularisation
         )
 
         self.block0 = WNOBlock(width)
@@ -193,7 +193,10 @@ class FNO2D(nn.Module):
         temporal_flat = temporal.permute(0, 1, 2, 4, 3).reshape(
             b * nx * ny, self.num_temporal_features, self.total_time
         )
-        temporal_encoded = self.temporal_encoder(temporal_flat)          # (B*H*W, 32)
+        # Fix 1a: run TemporalEncoder in float32 even inside AMP; prevents
+        # the massive fp16 backward graph that poisons WNO block gradients.
+        with torch.autocast(device_type=temporal_flat.device.type, enabled=False):
+            temporal_encoded = self.temporal_encoder(temporal_flat.float())  # (B*H*W, 32)
         temporal_encoded = temporal_encoded.reshape(b, nx, ny, 32)
 
         x_new = torch.cat([pm, temporal_encoded, static_topo], dim=-1)  # (B, H, W, 64)
