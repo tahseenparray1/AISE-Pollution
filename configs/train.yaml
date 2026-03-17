@@ -3,36 +3,37 @@ experiment:
 
 paths:
   savepath_train: /kaggle/temp/data/train/
-  savepath_val: /kaggle/temp/data/val/
-  save_dir: /kaggle/working/log.json
+  savepath_val:   /kaggle/temp/data/val/
+  save_dir:       /kaggle/working/log.json
+  # FIX Bug #6: log_path was missing; fallback was writing to script cwd
+  log_path:       /kaggle/working/training.log
   model_save_path: /kaggle/working/fno_baseline.pt
-  stats_path: /kaggle/working/grid_robust_stats.npy
-  topo_path: /kaggle/working/topo_proxy.npy
+  stats_path:     /kaggle/working/grid_robust_stats.npy
+  topo_path:      /kaggle/working/topo_proxy.npy
 
 data:
-  time_input: 10
-  time_out: 16
-  S1: 140
-  S2: 124
-  total_time: 26
-  stride: 4
+  time_input:  10
+  time_out:    16
+  S1:          140
+  S2:          124
+  total_time:  26
+  stride:      4
 
 features:
-  V: 17
-  met_variables: ["cpm25", "t2", "u10", "v10", "swdown", "pblh", "rain"]
-  emission_variables:
-    ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
+  V: 18   # 1 PM2.5 + 7 met + 7 emi + 3 derived
+  met_variables:       ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+  emission_variables:  ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+  derived_variables:   ["wind_speed", "vent_coef", "rain_mask"]
 
 model:
   modes: 8
   width: 256
 
 training:
-  batch_size: 16
-  epochs: 80
-  lr: 1e-3
-  weight_decay: 1e-5
-  checkpoint_every: 10
-  save_checkpoint: True
-  early_stopping: False
+  batch_size:        16
+  epochs:            100
+  lr:                1e-3
+  weight_decay:      1e-5
+  checkpoint_every:  10
+  save_checkpoint:   True
+  early_stopping:    False

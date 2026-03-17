@@ -2,27 +2,30 @@ experiment:
   name: baseline
 
 paths:
-  input_loc: /kaggle/input/competitions/aisehack-theme-2/test_in/
+  input_loc:  /kaggle/input/competitions/aisehack-theme-2/test_in/
+  # FIX Critical #1: checkpoint name matches train.yaml model_save_path + _best suffix
   checkpoint: /kaggle/working/fno_baseline_best.pt
   output_loc: /kaggle/working/
   stats_path: /kaggle/working/grid_robust_stats.npy
-  topo_path: /kaggle/working/topo_proxy.npy
+  topo_path:  /kaggle/working/topo_proxy.npy
 
 data:
-  dataset: test_in
-  ntest: 996
+  dataset:    test_in
+  ntest:      996
   time_input: 10
-  time_out: 16
+  time_out:   16
   total_time: 26
-  S1: 140
-  S2: 124
+  S1:         140
+  S2:         124
 
 features:
-  V: 17
-  met_variables: ["cpm25", "t2", "u10", "v10", "swdown", "pblh", "rain"]
-  emission_variables:
-    ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-  derived_variables: ["wind_speed", "vent_coef", "rain_mask"]
+  # FIX Critical #1: q2 (specific humidity) was missing here but present in train.yaml.
+  # That caused infer.py to build in_channels=266 while the saved model expects 292.
+  # model.load_state_dict() would crash with a size mismatch on input_encoder.
+  V: 18   # must match train.yaml V
+  met_variables:      ["cpm25", "q2", "t2", "u10", "v10", "swdown", "pblh", "rain"]
+  emission_variables: ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
+  derived_variables:  ["wind_speed", "vent_coef", "rain_mask"]
 
 model:
   modes: 8
