@@ -62,7 +62,7 @@ logging.basicConfig(
 S1, S2 = cfg.data.S1, cfg.data.S2
 
 # FIX Bug #5: AMP is now a single boolean.  Set True to enable; False = pure float32.
-USE_AMP = False   # safe default: enable on GPU, off on CPU
+USE_AMP = torch.cuda.is_available()   # fp16 on GPU for ~1.8× speedup on tensor-core ops
 
 # ============================================================
 # 2. STATS & LOSS UTILITIES
@@ -228,15 +228,24 @@ model = FNO2D(
     num_temporal_features=temporal_features_count,
 ).to(device)
 
+if torch.cuda.device_count() > 1:
+    logging.info(f"Using {torch.cuda.device_count()} GPUs with DataParallel!")
+    model = torch.nn.DataParallel(model)
+
 total_params = sum(p.numel() for p in model.parameters())
 logging.info(f"Total parameters: {total_params:,}")
+
+# Resolve inner module for named_parameters so 'block' matching works
+# correctly whether or not DataParallel is wrapping the model.
+_inner = model.module if isinstance(model, torch.nn.DataParallel) else model
 
 # Fix 2: zero weight_decay for WNO blocks — their gradients (~0.0004) were being
 # eroded by decay at 1e-4 × weight (~0.01) = 1e-6/step. With 1760 steps, Block0
 # shrank from 0.129 → 0.104. Input/output encoders keep weight_decay (20× higher
 # gradients, actual overfitting risk).
-wno_params   = [p for n, p in model.named_parameters() if 'block' in n]
-other_params = [p for n, p in model.named_parameters() if 'block' not in n]
+wno_params   = [p for n, p in _inner.named_parameters() if 'block' in n]
+other_params = [p for n, p in _inner.named_parameters() if 'block' not in n]
+
 
 optimizer = Adam([
     {'params': wno_params,   'lr': float(cfg.training.lr), 'weight_decay': 0.0},
@@ -291,11 +300,9 @@ for ep in range(cfg.training.epochs):
 
         optimizer.zero_grad(set_to_none=True)
 
-        # Fix 3: single-pass training — chunked rollout fed corrupt chunk1 predictions
-        # (RMSE ~24 at epoch 0) as PM history, breaking the residual connection and
-        # costing ~1.4 val RMSE. infer.py keeps chunked rollout for inference-time coverage.
-        out       = model(x)
-        pred_phys = to_physical(out.float())
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=USE_AMP):
+            out = model(x)
+        pred_phys = to_physical(out.float())   # force fp32 before denorm
         targ_phys = to_physical(y.float())
         out_norm  = out.float()
 
@@ -305,7 +312,8 @@ for ep in range(cfg.training.epochs):
             out_norm, y.float(), pred_phys, targ_phys,
             threshold=100.0, alpha=0.05, max_penalty=2.0)
         total_loss  = huber_loss + 0.1 * loss_grad + 2.0 * skewed_loss
-        total_loss.backward()
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
 
         with torch.no_grad():
             pred_clipped   = F.relu(pred_phys.detach())
@@ -318,7 +326,8 @@ for ep in range(cfg.training.epochs):
         grad_ratio_acc += grad_in / (grad_out + 1e-8)
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         for name, param in model.named_parameters():
             if param.requires_grad and param.grad is not None:

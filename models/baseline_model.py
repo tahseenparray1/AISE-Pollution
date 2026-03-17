@@ -102,7 +102,9 @@ class WNOBlock(nn.Module):
         self.norm          = nn.GroupNorm(4, width)
 
     def forward(self, x):
-        x_norm = self.norm(x)
+        # Norm in float32: GroupNorm precision collapses on high-dynamic-range fields in fp16.
+        # Cast back to input dtype so the expensive conv ops still run in fp16 under AMP.
+        x_norm = self.norm(x.float()).to(x.dtype)
 
         x_w    = self.dwt(x_norm)
         x_w    = self.spectral_spatial(x_w)
