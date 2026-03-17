@@ -41,7 +41,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(0)
 np.random.seed(0)
 
-LOG_DYNAMICS_EVERY = 10   # FIX Bug #8: only run expensive layer-dynamics log every N epochs
+LOG_DYNAMICS_EVERY = 2   # FIX Bug #8: only run expensive layer-dynamics log every N epochs
 
 # FIX Bug #6: read log_path from config; fall back to /kaggle/working/training.log
 _log_path = getattr(cfg.paths, 'log_path', '/kaggle/working/training.log')
@@ -57,7 +57,7 @@ logging.basicConfig(
 S1, S2 = cfg.data.S1, cfg.data.S2
 
 # FIX Bug #5: AMP is now a single boolean.  Set True to enable; False = pure float32.
-USE_AMP = torch.cuda.is_available()   # safe default: enable on GPU, off on CPU
+USE_AMP = False   # safe default: enable on GPU, off on CPU
 
 # ============================================================
 # 2. STATS & LOSS UTILITIES
@@ -279,7 +279,7 @@ for ep in range(cfg.training.epochs):
         optimizer.zero_grad(set_to_none=True)
 
         # FIX Bug #5: clean AMP block — no spurious .float() casts needed
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=USE_AMP):
+        with torch.autocast(device_type=device.type, dtype=torch.float32, enabled=USE_AMP):
             out = model(x)
 
         pred_phys = to_physical(out.float())
