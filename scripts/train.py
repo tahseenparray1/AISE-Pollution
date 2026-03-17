@@ -97,8 +97,8 @@ for seed in SEEDS:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
 
     swa_model = AveragedModel(model)
-    swa_start = int(cfg.training.epochs * 0.75)
-    swa_scheduler = SWALR(optimizer, swa_lr=5e-4)
+    swa_start = int(cfg.training.epochs * 0.576)
+    swa_scheduler = SWALR(optimizer, swa_lr=0.00064)
 
     for ep in range(cfg.training.epochs):
         model.train()
@@ -120,7 +120,7 @@ for seed in SEEDS:
             
             mse_loss = ((pred_phys - targ_phys) ** 2 * horizon_weights).mean()
             loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-            total_loss = mse_loss + 0.1 * loss_grad
+            total_loss = mse_loss + 0.3228 * loss_grad
 
             with torch.no_grad():
                 pred_phys_clipped = F.relu(pred_phys.detach())

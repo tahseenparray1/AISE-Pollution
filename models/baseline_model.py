@@ -89,14 +89,11 @@ class FNO2D(nn.Module):
         self.time_out = time_out
         self.time_input = time_input  # Number of PM2.5 history hours (for residual connection)
         
-        # Encode ablated input down to 'width'
-        # FIX #3: Use standard Dropout instead of Dropout2d to avoid
-        # dropping entire temporal channels (e.g. "Hour 5 Wind Speed")
         self.input_encoder = nn.Sequential(
             nn.Conv2d(in_channels + 2, width, kernel_size=1),
             nn.GroupNorm(4, width),
             nn.GELU(),
-            nn.Dropout(p=0.05)
+            nn.Dropout(p=0.0)
         )
         
         # Stack WNO blocks instead of FNO blocks

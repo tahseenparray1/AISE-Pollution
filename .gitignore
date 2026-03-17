@@ -1,6 +1,7 @@
 .venv
 # Jupyter
 *.ipynb_checkpoints
+combined_code.txt
 
 # Model checkpoints / weights
 *.pt
