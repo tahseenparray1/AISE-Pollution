@@ -74,7 +74,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         return x, y
 
 train_ds = FastInMemoryDataset(cfg)
-train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=0, pin_memory=True)
 
 pm_channels = cfg.data.time_input
 temporal_channels = len(train_ds.temporal_idx) * cfg.data.total_time
