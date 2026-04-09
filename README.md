@@ -1,169 +1,235 @@
-# Baseline Pipeline with FNO2D Model
+# 🌫️ AISE Pollution — PM2.5 Spatio-Temporal Forecasting
 
-This repository provides a **reference baseline pipeline** for the Kaggle competition **[AISEHACK Theme 2 - Pollution Forecasting](https://www.kaggle.com/competitions/aisehack-theme-2/overview)**, demonstrating a complete end-to-end workflow using a **2D Fourier Neural Operator (FNO2D)** implementation. It is intended as a **clear, minimal, and reproducible example** rather than a production-optimized solution.
+A deep-learning pipeline for **hourly PM2.5 concentration forecasting** over a 140 × 124 spatial grid, built for the **[AISEHACK Theme 2 — Pollution Forecasting](https://www.kaggle.com/competitions/aisehack-theme-2/overview)** Kaggle competition.
 
----
-
-## Purpose of This Repository
-
-- Serve as a **starter template** for building Kaggle notebook submissions  
-- Demonstrate how to structure:
-  - Dataset preparation
-  - Model training
-  - Inference and submission generation
-- Reproduce the **Baseline Benchmark** currently listed on the leaderboard
-- Provide a clean reference that users can freely modify or extend
-
-- This repository is **not restrictive**. 
+> **Core idea:** Given 10 hours of meteorological, emission, and derived atmospheric features, predict the next 16 hours of PM2.5 concentrations at every grid cell.
 
 ---
 
-## Pipeline Overview
+## Table of Contents
 
-The workflow is organized into **three sequential stages**:
-
-1. **Dataset Preparation(prepare_dataset.py)**  
-   Converts raw competition data into normalized, fixed-length spatio-temporal samples suitable for model training.
-
-2. **Model Training(train.py)**  
-   Trains an FNO2D model using the prepared datasets to forecast future PM2.5 concentration fields.
-
-3. **Inference(infer.py)**  
-   Runs the trained model on unseen test data and generates predictions in the format required for Kaggle submission.
-
-- Each stage produces artifacts that are consumed by the next stage.
-
-- Configurations of each script is given in their corresponding yaml files inside `configs/`
+- [Architecture](#architecture)
+- [Repository Structure](#repository-structure)
+- [Features & Preprocessing](#features--preprocessing)
+- [Pipeline Stages](#pipeline-stages)
+  - [1. Dataset Preparation](#1-dataset-preparation-prepare_datasetpy)
+  - [2. Model Training](#2-model-training-trainpy)
+  - [3. Inference](#3-inference-inferpy)
+- [Configuration](#configuration)
+- [Using with Kaggle](#using-with-kaggle)
+- [Requirements](#requirements)
+- [Kaggle Data Locations](#kaggle-data-locations)
+- [Kaggle Resource Tips](#kaggle-resource-tips)
 
 ---
 
-## Baseline Benchmark
+## Architecture
 
-- The training configuration in this repository **matches the official baseline benchmark** shown on the Kaggle leaderboard.
-- All hyperparameters, features, and preprocessing steps are chosen to replicate that baseline faithfully.
+The model is a **Wavelet Neural Operator (WNO)** that replaces classic Fourier spectral convolutions with **2D Haar Discrete Wavelet Transforms**:
 
+```
+Input → Conv1×1 Encoder → [WNO Block ×4] → GELU → Conv1×1 Decoder → + Residual → Output
+```
+
+Each **WNO Block** performs:
+
+1. **GroupNorm** on the input
+2. **Haar DWT** — decomposes into LL / LH / HL / HH sub-bands at half resolution
+3. **Spectral Mixer** — group-wise 3×3 conv across the 4 sub-bands
+4. **Inverse Haar DWT** — reconstructs back to full resolution
+5. **Spatial Mixer** — depthwise 5×5 conv for long-range spatial context
+6. **Pointwise Conv** + **GELU** activation + **Residual connection**
+
+The decoder head outputs a **delta** (change) which is added to the last known PM2.5 state via a residual connection — the network learns the *change* from the current state rather than absolute values.
+
+### Training Enhancements
+
+| Technique | Detail |
+|---|---|
+| **Multi-Seed Ensemble** | 3 models trained with seeds `[0, 42, 2026]`, averaged at inference |
+| **SWA** | Stochastic Weight Averaging kicks in at ~57.6% of training |
+| **Cosine Annealing LR** | Decays from `7.82e-4` to `1e-6` with SWA override |
+| **Spatial Gradient Loss** | L1 penalty on spatial gradients to preserve sharp concentration fronts |
+| **Horizon Weighting** | Later forecast steps (hours 11–26) receive up to 1.5× loss weight |
+| **Input Noise** | Gaussian noise (`σ = 0.01`) injected during training (topography channel excluded) |
+| **Gradient Clipping** | Max norm = 1.0 |
 
 ---
 
-## Using This Repository with Kaggle
+## Repository Structure
 
-- This repository is designed to be used **as a Kaggle dataset**, not run directly on local machines.
+```
+AISE-Pollution/
+├── configs/                         # YAML configuration files
+│   ├── prepare_dataset.yaml         #   Dataset preparation settings
+│   ├── prepare_rapid.yaml           #   Rapid/debug dataset prep variant
+│   ├── train.yaml                   #   Training hyperparameters
+│   ├── train_rapid.yaml             #   Rapid/debug training variant
+│   └── infer.yaml                   #   Inference settings
+├── models/
+│   └── baseline_model.py            # WNO model (FNO2D class w/ Haar wavelet blocks)
+├── scripts/
+│   ├── prepare_dataset.py           # Stage 1 — data preprocessing & normalization
+│   ├── train.py                     # Stage 2 — multi-seed ensemble training
+│   └── infer.py                     # Stage 3 — ensemble inference & submission
+├── src/
+│   └── utils/
+│       ├── adam.py                   # Custom Adam optimizer implementation
+│       ├── config.py                # YAML config loader with dot-attribute access
+│       ├── metrics.py               # RMSE, MFB, SMAPE evaluation metrics
+│       └── utilities3.py            # Lp loss utilities
+├── notebooks/                       # Jupyter notebooks (for EDA / experimentation)
+├── requirements.txt                 # Python dependencies
+├── .gitignore
+└── README.md
+```
 
-### Recommended Setup
+---
+
+## Features & Preprocessing
+
+### Input Variables (17 channels)
+
+| Category | Variables |
+|---|---|
+| **Meteorological (7)** | `cpm25`, `t2`, `u10`, `v10`, `swdown`, `pblh`, `rain` |
+| **Emission (7)** | `PM25`, `NH3`, `SO2`, `NOx`, `NMVOC_e`, `NMVOC_finn`, `bio` |
+| **Derived (3)** | `wind_speed`, `vent_coef`, `rain_mask` |
+
+A **topography proxy** channel (z-score normalized median surface pressure) is also appended as a static spatial feature.
+
+### Normalization Strategy
+
+| Variable Type | Method |
+|---|---|
+| Meteorological + Derived | **Robust grid-wise** — per-pixel `(x − median) / IQR` with IQR floored at 5.0 |
+| Emission | **Global min–max** after `log1p(x × 1e11)` scaling |
+| Rain, PBLH | `log1p` transform before robust normalization |
+
+Statistics are computed across all training months and saved to `grid_robust_stats.npy`.
+
+---
+
+## Pipeline Stages
+
+Run the three stages **sequentially** — each stage's outputs feed the next:
+
+```bash
+python scripts/prepare_dataset.py → python scripts/train.py → python scripts/infer.py
+```
+
+### 1. Dataset Preparation (`prepare_dataset.py`)
+
+- Loads raw `.npy` arrays per month from the competition data
+- Computes derived features (`wind_speed = √(u² + v²)`, `vent_coef = log1p(ws × pblh)`, `rain_mask`)
+- Computes grid-wise robust statistics and saves them
+- Generates a topography proxy from median surface pressure
+- Normalizes all features and concatenates into a single `(T, H, W, F)` tensor per month
+- Builds a sliding-window index (`horizon = 26`, `stride = 4`) for efficient sampling
+- Saves `train_data.npy` and `train_indices.npy`
+
+### 2. Model Training (`train.py`)
+
+- Loads prepared data **fully into RAM** via `FastInMemoryDataset`
+- Trains **3 independent models** (seeds `[0, 42, 2026]`) sequentially, clearing GPU memory between runs
+- Uses composite loss: **horizon-weighted MSE** + **0.3228 × spatial gradient L1** (computed in physical units)
+- Applies **SWA** in the final ~42% of epochs
+- Saves one checkpoint per seed: `fno_baseline_seed{0,42,2026}.pt`
+
+### 3. Inference (`infer.py`)
+
+- Loads each of the 3 seed checkpoints sequentially (memory-safe)
+- Applies identical normalization and derived-feature computation to test data
+- Accumulates predictions from all 3 models and computes the ensemble average
+- De-normalizes predictions back to physical PM2.5 units
+- Clips negative values to 0 (physical bound)
+- Saves final `preds.npy` with shape `(N_test, H, W, 16)`
+
+---
+
+## Configuration
+
+All hyperparameters are controlled via YAML files in `configs/`. Key parameters:
+
+| Config | Parameter | Default |
+|---|---|---|
+| `prepare_dataset.yaml` | `months` | `APRIL_16, JULY_16, OCT_16, DEC_16` |
+| | `horizon` / `stride` | `26` / `4` |
+| | `val_frac` | `0.2` |
+| `train.yaml` | `width` | `192` |
+| | `batch_size` | `16` |
+| | `epochs` | `80` |
+| | `lr` / `weight_decay` | `7.82e-4` / `7.6e-5` |
+| `infer.yaml` | `ntest` | `996` |
+
+> **Rapid configs** (`prepare_rapid.yaml`, `train_rapid.yaml`) are provided for quick debugging runs with reduced settings.
+
+---
+
+## Using with Kaggle
+
+This repository is designed to be used **as a Kaggle dataset**.
+
+### Setup
 
 1. Upload this repository as a **Kaggle Dataset**
-2. Open the provided **baseline Kaggle notebook**: **[Link](https://www.kaggle.com/code/siddharthandileep/baseline-run-aisehack-test/)**, Copy and Edit the same.
+2. Open the **[baseline Kaggle notebook](https://www.kaggle.com/code/siddharthandileep/baseline-run-aisehack-test/)** → Copy and Edit
 3. Add:
    - This repository (as a dataset)
    - The official competition dataset
-4. Set the accelerator to **GPU (P100)**
+4. Set accelerator to **GPU (P100)**
 5. Click **Save & Run All**
 
-The execution will emulate the baseline run:
-- Read scripts and configs from this repository
-- Execute dataset preparation, training, and inference
-- Produce the final `preds.npy` submission file
+The notebook will execute dataset preparation, training, and inference end-to-end, producing `preds.npy` for submission.
 
 ---
 
-## Intended Audience
+## Requirements
 
-This codebase is suitable for:
-- First-time participants looking for a **clean starting point**
-- Users unfamiliar with FNO-based spatio-temporal modeling
-- Competitors who want a **working end-to-end baseline** before experimentation
+```
+torch>=2.0
+triton
+numpy
+scipy
+pandas
+h5py
+netCDF4
+xarray
+matplotlib
+seaborn
+scikit-learn
+joblib
+tqdm
+PyYAML
+```
 
----
+Install with:
 
-## Extra Notes
-
-- This repository emphasizes **clarity and reproducibility** over aggressive optimization, using memory-mapped NumPy arrays to operate reliably within Kaggle memory constraints. All scripts are fully configurable via YAML files, enabling easy and controlled experimentation.
-
-- **Performance note:** the current training dataloader builds each sample by reading feature arrays individually and stacking them on-the-fly. While this keeps memory usage low and the implementation easy to follow, it introduces a **feature-wise I/O bottleneck** that can significantly increase training time—especially when training for many epochs, using larger batch sizes, or scaling to wider and deeper models. Participants planning longer training runs or higher-capacity models are **strongly encouraged to optimize this step**.
-
----
-
-
-## Kaggle Data Locations for the Pipeline
-
-- **Raw training data:** `/kaggle/input/competitions/aisehack-theme-2/raw/<MONTH>/<feature>.npy`
-- **Test inputs:** `/kaggle/input/competitions/aisehack-theme-2/test_in/<feature>.npy`
-- **Min–max statistics:** `/kaggle/input/competitions/aisehack-theme-2/stats/feat_min_max.mat`
-- **Prepared datasets:** `/kaggle/temp/data/train/`, `/kaggle/temp/data/val/`
-- **Checkpoints & logs:** `/kaggle/working/experiments/baseline/`
-- **Final predictions:** `/kaggle/working/preds.npy`
+```bash
+pip install -r requirements.txt
+```
 
 ---
 
-## Points to remember regarding working with Kaggle
+## Kaggle Data Locations
 
-- Using **GPU P100** accelerator you have a peak CPU RAM limit of 29GB.
-- You can save data upto 20GB in `/kaggle/working/`, data stored here is accessible even after session is closed. So anything relevant to be saved like final test predictions have to be saved here. Rest you can save in `/kaggle/temp/` or any directory outside of `/kaggle/working/`, they won't be saved once session is over.
-- Keep in mind of all other logistical constraints imposed by Kaggle like session time limit, available weekly GPU compute etc and make sure your pipeline is as robust as possible to these constraints.
-- Anything inside `/kaggle/input/`is read-only.
-- Make sure to save your final test predictions in `/kaggle/working/preds.npy` for evaluation in this competition.
-
----
-
-## Dataset Preparation (`prepare_dataset.py`)
-- Raw feature arrays of shape `(T, H, W)` are loaded month-wise, normalized using precomputed min–max statistics, and converted into fixed-length time-series samples using a sliding window (`horizon=26`, `stride=1`). 
-
-- Wind components (`u10`, `v10`) are scaled to `[-1, 1]`, emission variables are clipped to `[0, 1]`, and all samples are randomly split into training (80%) and validation (20%) sets. 
-
-- Samples from all configured months are concatenated feature-wise and saved as separate NumPy arrays for each feature.
-
-**Outputs:**  
-`/kaggle/temp/data/train/train_<feature>.npy`  
-`/kaggle/temp/data/val/val_<feature>.npy`  
-Each file has shape `(N, 26, H, W)`.
+| Artifact | Path |
+|---|---|
+| Raw training data | `/kaggle/input/competitions/aisehack-theme-2/raw/<MONTH>/<feature>.npy` |
+| Test inputs | `/kaggle/input/competitions/aisehack-theme-2/test_in/<feature>.npy` |
+| Grid-wise statistics | `/kaggle/working/grid_robust_stats.npy` |
+| Topography proxy | `/kaggle/working/topo_proxy.npy` |
+| Prepared datasets | `/kaggle/temp/data/train/` |
+| Model checkpoints | `/kaggle/working/fno_baseline_seed{0,42,2026}.pt` |
+| Final predictions | `/kaggle/working/preds.npy` |
 
 ---
 
-## Model Training (`train.py`)
+## Kaggle Resource Tips
 
-- The training script loads the prepared datasets using memory-mapped NumPy arrays, stacks all meteorological and emission variables channel-wise, and trains an **FNO2D** model. 
-
-- The first 10 timesteps are used as input to predict the next 16 timesteps, with supervision applied only on future `cpm25`. Training uses Adam optimization with L2 loss, a step learning-rate scheduler, periodic model checkpointing, and JSON-based logging.
-
-**Outputs:**  
-- Model checkpoints saved in : `/kaggle/working/experiments/baseline/checkpoints/fno_baseline_ep<epoch>.pt`  
-- Training logs saved in : 
-`/kaggle/working/experiments/baseline/logs/log.json`
-
----
-
-## Inference (`infer.py`)
-
-- Inference loads feature-wise test inputs, applies the same normalization as training, and feeds the first 10 timesteps into the trained FNO model to predict 16 future cpm25 timesteps. 
-
-- Predictions are de-normalized back to physical units using stored min–max statistics and saved as a single NumPy file - `preds.npy`.
-
-**Outputs:**  
-`/kaggle/working/preds.npy` with shape `(N_test, H, W, 16)`.
-
----
-
-## Execution Order
-Run the pipeline sequentially:
-`python prepare_dataset.py` → `python train.py` → `python infer.py`
-
-Each stage depends strictly on outputs produced by the previous step.
-
-
-## Baseline Notebook — Execution Details
-
-**Hardware**
-- GPU: P100
-
-**Runtime**
-- ~350 seconds per epoch
-- ~9.8 hours for the complete run
-
-**Disk Usage**
-- ~78 GB written during execution
-  - ~76 GB: Prepared train/val dataset stored at `/kaggle/temp/data` in float32
-
-**Memory Usage**
-- Peak RAM: < 12 GB / 30 GB
-- Peak GPU Memory: < 4 GB / 16 GB
-
+- **GPU P100** — peak CPU RAM limit of **29 GB**
+- `/kaggle/working/` — persistent (up to **20 GB**); save final predictions here
+- `/kaggle/temp/` — non-persistent; good for large intermediate data
+- `/kaggle/input/` — **read-only**
+- Be mindful of session time limits and weekly GPU quotas; the full pipeline takes **~9.8 hours**
+- Final test predictions **must** be saved as `/kaggle/working/preds.npy`
