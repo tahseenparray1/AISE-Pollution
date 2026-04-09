@@ -10,14 +10,7 @@ from models.baseline_model import FNO2D
 from torch.optim.swa_utils import AveragedModel, SWALR 
 
 cfg = load_config("configs/train.yaml")
-# --- OVERRIDE CONFIG PATHS TO USE GOOGLE DRIVE ---
-cfg.paths.stats_path = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/stats/global_stats.npy"
-cfg.paths.savepath_train = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/train_data"
-cfg.paths.model_save_path = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/models/fno2d.pt"
 
-# Make sure the models directory actually exists before saving!
-os.makedirs("/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/models", exist_ok=True)
-# -------------------------------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 S1, S2 = cfg.data.S1, cfg.data.S2
