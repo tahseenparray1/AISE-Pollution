@@ -4,7 +4,16 @@ from tqdm import tqdm
 from src.utils.config import load_config
 
 cfg = load_config("configs/prepare_dataset.yaml")
-RAW_PATH = cfg.paths.raw_path
+
+# --- OVERRIDE CONFIG PATHS TO USE GOOGLE DRIVE ---
+# Point to the 'raw' folder inside your new Drive directory
+RAW_PATH = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/raw"
+
+# Ensure the script saves the generated statistics and training data to your Drive
+# so you don't lose them when Colab shuts down!
+cfg.paths.stats_path = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/stats/global_stats.npy"
+cfg.paths.train_savepath = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/train_data"
+# -------------------------------------------------
 
 derived_features = ['wind_speed', 'vent_coef', 'rain_mask']
 all_features = cfg.features.met_variables_raw + cfg.features.emission_variables_raw + derived_features
