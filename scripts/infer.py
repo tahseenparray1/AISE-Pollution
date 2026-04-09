@@ -11,6 +11,12 @@ warnings.filterwarnings("ignore")
 
 cfg_infer = load_config("configs/infer.yaml")
 cfg_train = load_config("configs/train.yaml")
+# --- OVERRIDE CONFIG PATHS TO USE GOOGLE DRIVE ---
+cfg_infer.paths.stats_path = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/stats/global_stats.npy"
+cfg_infer.paths.input_loc = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/test_in"
+cfg_train.paths.model_save_path = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/models/fno2d.pt"
+cfg_infer.paths.output_loc = "/content/drive/MyDrive/Kaggle/AISE-Pollution_Data/output"
+# -------------------------------------------------
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
