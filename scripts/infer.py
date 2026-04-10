@@ -106,7 +106,7 @@ class TestDataLoader(torch.utils.data.Dataset):
         return x
 
 test_dataset = TestDataLoader(cfg_infer, cfg_train, stats, topo_proxy)
-test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=0)
 pm_channels = cfg_train.data.time_input
 num_temporal_features = (len(cfg_train.features.met_variables) - 1) + len(cfg_train.features.derived_variables) + len(cfg_train.features.emission_variables)
 temporal_channels = num_temporal_features * cfg_train.data.total_time 
