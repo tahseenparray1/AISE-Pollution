@@ -113,7 +113,7 @@ temporal_channels = num_temporal_features * cfg_train.data.total_time
 topo_channels = 1
 in_channels = pm_channels + temporal_channels + topo_channels
 
-SEEDS = [0, 42, 2026]
+SEEDS = [0]
 # Accumulator array for the ensemble sum
 prediction_sum = np.zeros((len(test_dataset), cfg_train.data.S1, cfg_train.data.S2, cfg_train.data.time_out), dtype=np.float32)
 

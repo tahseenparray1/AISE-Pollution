@@ -83,7 +83,7 @@ in_channels = pm_channels + temporal_channels + topo_channels
 
 # --- MULTI-SEED ENSEMBLE TRAINING LOOP ---
 # --- MULTI-SEED ENSEMBLE TRAINING LOOP ---
-SEEDS = [0, 42, 2026] # 3 models for ensembling
+SEEDS = [0] # 3 models for ensembling
 
 for seed in SEEDS:
     print(f"\n{'='*40}")
