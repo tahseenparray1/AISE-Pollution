@@ -123,3 +123,7 @@ and run the code cells in order.
 - ⏱️ The full pipeline takes approximately **3-4 hours** on a Kaggle P100 GPU.
 - 💾 `/kaggle/working/` is persistent storage (up to 20 GB) — final outputs are saved here.
 - 🗑️ `/kaggle/temp/` is non-persistent — used for large intermediate data.
+
+
+## 🚀 Link To Our PPT Presentation:
+https://canva.link/gz3uqqwwhhx3w1p
