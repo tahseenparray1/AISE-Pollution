@@ -87,7 +87,7 @@ topo_channels = 1
 in_channels = pm_channels + temporal_channels + topo_channels
 
 # --- MULTI-SEED ENSEMBLE TRAINING LOOP ---
-SEEDS = [42] # Reduced to 1 seed for ultra-fast training (previously 3)
+SEEDS = [0] # Single seed execution for faster loops, but restored to 0 to match initialization
 
 for seed in SEEDS:
     print(f"\n{'='*40}")

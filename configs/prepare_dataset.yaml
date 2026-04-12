@@ -9,7 +9,7 @@ paths:
 data:
   months: ["APRIL_16", "JULY_16", "OCT_16", "DEC_16"]
   horizon: 26
-  stride: 16
+  stride: 4
   val_frac: 0.2
   test_frac: 0.1
   seed: 0

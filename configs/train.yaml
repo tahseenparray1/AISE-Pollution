@@ -16,7 +16,7 @@ data:
   S1: 140
   S2: 124
   total_time: 26
-  stride: 16
+  stride: 4
 
 features:
   V: 17
