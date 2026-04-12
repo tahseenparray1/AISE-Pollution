@@ -30,7 +30,7 @@ model:
   width: 192
 
 training:
-  batch_size: 32
+  batch_size: 16
   epochs: 80
   lr: 0.000782
   weight_decay: 0.000076

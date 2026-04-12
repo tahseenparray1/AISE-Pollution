@@ -107,9 +107,6 @@ for seed in SEEDS:
 
     optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
-    
-    # Initialize Mixed Precision Scaler for P100
-    scaler = torch.amp.GradScaler('cuda')
 
     swa_model = AveragedModel(model)
     swa_start = int(cfg.training.epochs * 0.576)
@@ -129,24 +126,21 @@ for seed in SEEDS:
             
             optimizer.zero_grad(set_to_none=True)
             
-            with torch.amp.autocast('cuda'):
-                out = model(x)
-                pred_phys = to_physical(out)
-                targ_phys = to_physical(y)
-                
-                mse_loss = ((pred_phys - targ_phys) ** 2 * horizon_weights).mean()
-                loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-                total_loss = mse_loss + 0.3228 * loss_grad
+            out = model(x)
+            pred_phys = to_physical(out)
+            targ_phys = to_physical(y)
+            
+            mse_loss = ((pred_phys - targ_phys) ** 2 * horizon_weights).mean()
+            loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+            total_loss = mse_loss + 0.3228 * loss_grad
 
             with torch.no_grad():
                 pred_phys_clipped = F.relu(pred_phys.detach())
                 train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             
-            scaler.scale(total_loss).backward()
-            scaler.unscale_(optimizer)
+            total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
 
         model.eval()
         val_mse_acc = 0.0
