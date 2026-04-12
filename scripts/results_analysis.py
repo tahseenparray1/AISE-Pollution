@@ -6,7 +6,7 @@ import torch
 import warnings
 
 # Use the train configurator to fetch test splits
-from configs.config import load_config
+from src.utils.config import load_config
 # We can dynamically import the dataset builder from train
 import importlib.util
 
