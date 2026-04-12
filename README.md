@@ -2,13 +2,12 @@
 
 ## 📖 Overview
 
-India's rapid industrialisation and urbanisation has led to severe air quality degradation. PM2.5 (particulate matter < 2.5 micrometres) is the dominant pollutant across most regions. These fine particles enter the lungs during breathing and cause serious health issues — the Global Burden of Disease 2019 estimated ~1.67 million deaths attributable to air pollution in India.
-
-Traditional air quality models solve complex differential equations and need large computational resources. Machine Learning models offer a faster alternative by learning directly from data and providing quicker forecasts, enabling timely public health interventions.
-
-This project builds a deep learning pipeline for **hourly PM2.5 concentration forecasting** over a 140 × 124 spatial grid covering India. Given 10 hours of meteorological, emission, and atmospheric features, the model predicts the next 16 hours of PM2.5 concentrations at every grid cell.
-
-The dataset used is from WRF-Chem (a numerical weather-chemistry model) for the year 2016, provided as part of the [AISEHACK Theme 2 Kaggle competition](https://www.kaggle.com/competitions/aisehack-theme-2/overview).
+- 🇮India's air quality is severely degraded — PM2.5 (particles < 2.5µm) causes ~1.67 million deaths annually.
+- 🧮 Traditional air quality models solve complex differential equations and need large computational resources. Machine Learning models offer a faster alternative by learning directly from data and providing quicker forecasts, enabling timely public health interventions.
+- 🎯 This project uses deep learning to **forecast hourly PM2.5 concentrations** over a 140 × 124 spatial grid covering India.
+- 📥 **Input:** 10 hours of meteorological, emission, and atmospheric features.
+- 📤 **Output:** Next 16 hours of PM2.5 predictions at every grid cell.
+- 📂 **Dataset:** WRF-Chem simulation data for the year 2016.
 
 ---
 
