@@ -112,17 +112,23 @@ test_frac = getattr(cfg.data, 'test_frac', 0.1)
 train_frac = 1.0 - val_frac - test_frac
 
 print("Processing Data and splitting chronologically (Train/Val/Test)...")
+buffer = cfg.data.horizon - 1  # 25-hour gap to prevent temporal leakage
+
 for month in tqdm(cfg.data.months):
     blocks = process_month(month)
     combined = blocks[0]
     total_hours = combined.shape[0]
     
     train_end = int(train_frac * total_hours)
+    val_start = train_end + buffer
     val_end = int((train_frac + val_frac) * total_hours)
+    test_start = val_end + buffer
     
     train_blocks.append(combined[:train_end])
-    val_blocks.append(combined[train_end:val_end])
-    test_blocks.append(combined[val_end:])
+    val_blocks.append(combined[val_start:val_end])
+    test_blocks.append(combined[test_start:])
+    
+    print(f"  {month}: Train [0:{train_end}], Val [{val_start}:{val_end}], Test [{test_start}:{total_hours}] | Buffer={buffer}h")
 
 final_train, train_indices = build_dataset_and_indices(train_blocks, cfg.data.horizon, cfg.data.stride)
 final_val, val_indices = build_dataset_and_indices(val_blocks, cfg.data.horizon, cfg.data.stride)
