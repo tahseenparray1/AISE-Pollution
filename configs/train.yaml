@@ -4,6 +4,7 @@ experiment:
 paths:
   savepath_train: /kaggle/temp/data/train/
   savepath_val: /kaggle/temp/data/val/
+  savepath_test: /kaggle/temp/data/test/
   save_dir: /kaggle/working/log.json
   model_save_path: /kaggle/working/fno_baseline.pt
   stats_path: /kaggle/working/grid_robust_stats.npy
@@ -15,7 +16,7 @@ data:
   S1: 140
   S2: 124
   total_time: 26
-  stride: 4
+  stride: 16
 
 features:
   V: 17
@@ -29,7 +30,7 @@ model:
   width: 192
 
 training:
-  batch_size: 16
+  batch_size: 32
   epochs: 80
   lr: 0.000782
   weight_decay: 0.000076

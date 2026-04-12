@@ -26,81 +26,47 @@ pm_iqr = stats['cpm25']['iqr'].reshape(1, cfg_infer.data.S1, cfg_infer.data.S2, 
 def denorm(x):
     return (x * pm_iqr) + pm_median
 
-psfc_test = np.load(os.path.join(cfg_infer.paths.input_loc, "psfc.npy"))
-psfc_median = np.median(psfc_test, axis=1) 
-topo_proxy = (psfc_median - np.mean(psfc_median)) / (np.std(psfc_median) + 1e-5)
-
-class TestDataLoader(torch.utils.data.Dataset):
-    def __init__(self, cfg_infer, cfg_train, stats_dict, topo_proxy):
-        self.time_in = cfg_train.data.time_input    
-        self.total_time = cfg_train.data.total_time 
-        self.S1 = cfg_train.data.S1
-        self.S2 = cfg_train.data.S2
+class FastInMemoryDataset(torch.utils.data.Dataset):
+    def __init__(self, cfg, split="test"):
+        if split == "train":
+            base_path = cfg.paths.savepath_train
+        elif split == "val":
+            base_path = cfg.paths.savepath_val
+        elif split == "test":
+            base_path = cfg.paths.savepath_test
+        else:
+            raise ValueError(f"Unknown split: {split}")
+            
+        print(f"Loading {split.capitalize()} Data into RAM...")
+        self.data = torch.from_numpy(np.load(os.path.join(base_path, f"{split}_data.npy")).astype(np.float32))
+        self.valid_starts = np.load(os.path.join(base_path, f"{split}_indices.npy"))
         
-        self.met_variables = cfg_train.features.met_variables
-        self.emi_variables = cfg_train.features.emission_variables
+        self.time_in = cfg.data.time_input
+        self.total_time = cfg.data.total_time
+        self.S1, self.S2 = cfg.data.S1, cfg.data.S2
         
-        self.stats = stats_dict
-        self.topo_proxy = topo_proxy
+        all_features = (cfg.features.met_variables + cfg.features.emission_variables + cfg.features.derived_variables)
+        self.target_idx = all_features.index('cpm25')
+        self.temporal_idx = [i for i, f in enumerate(all_features) if f != 'cpm25']
+        self.topo_idx = len(all_features)
 
-        self.arrs = {}
-        for feat in self.met_variables + self.emi_variables:
-            path = os.path.join(cfg_infer.paths.input_loc, f"{feat}.npy")
-            self.arrs[feat] = np.load(path, mmap_mode="r")
-
-        self.N = self.arrs['cpm25'].shape[0]
-
-    def __len__(self):
-        return self.N
+    def __len__(self): 
+        return len(self.valid_starts)
 
     def __getitem__(self, idx):
-        seq_raw = {}
-        for feat in self.met_variables + self.emi_variables:
-            if feat == "cpm25":
-                seq_raw[feat] = np.array(self.arrs[feat][idx, :self.time_in], dtype=np.float32)
-            else:
-                seq_raw[feat] = np.array(self.arrs[feat][idx, :self.total_time], dtype=np.float32)
-                
-        ws = np.sqrt(seq_raw['u10']**2 + seq_raw['v10']**2)
-        vc = np.log1p(ws * seq_raw['pblh'])
-        rm = (seq_raw['rain'] > 0).astype(np.float32)
+        start = self.valid_starts[idx]
+        window = self.data[start : start + self.total_time].clone() 
         
-        seq_raw['wind_speed'] = ws
-        seq_raw['vent_coef'] = vc
-        seq_raw['rain_mask'] = rm
+        pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
+        temporal_all = window[:, ..., self.temporal_idx]
+        temporal_tensor = temporal_all.permute(1, 2, 0, 3).reshape(self.S1, self.S2, -1)
+        topo = window[0, ..., self.topo_idx].unsqueeze(-1)
         
-        emi_vars = ["PM25", "NH3", "SO2", "NOx", "NMVOC_e", "NMVOC_finn", "bio"]
-        for feat in emi_vars:
-            if feat in seq_raw:
-                seq_raw[feat] = np.log1p(seq_raw[feat] * 1e11)
-                
-        skewed_features = ['rain', 'pblh']
-        for feat in skewed_features:
-            if feat in seq_raw:
-                seq_raw[feat] = np.log1p(seq_raw[feat])
+        x = torch.cat((pm_hist, temporal_tensor, topo), dim=-1)
+        y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
+        return x, y
 
-        temporal_feats = []
-        temporal_list = [f for f in self.met_variables if f != 'cpm25'] + self.emi_variables + cfg_train.features.derived_variables
-        
-        for feat in temporal_list:
-            if self.stats[feat].get('type') == 'minmax':
-                f_min, f_max = self.stats[feat]['min'], self.stats[feat]['max']
-                arr = (seq_raw[feat] - f_min) / (f_max - f_min)
-            else:
-                arr = (seq_raw[feat] - self.stats[feat]['median']) / self.stats[feat]['iqr']
-            temporal_feats.append(arr)
-            
-        pm25_hist = (seq_raw['cpm25'] - self.stats['cpm25']['median']) / self.stats['cpm25']['iqr']
-        pm25_hist = torch.from_numpy(pm25_hist).permute(1, 2, 0) 
-        
-        temporal_stack = np.stack(temporal_feats, axis=0)
-        temporal_tensor = torch.from_numpy(temporal_stack).permute(2, 3, 1, 0).reshape(self.S1, self.S2, -1)
-        topo_tensor = torch.from_numpy(self.topo_proxy[idx]).unsqueeze(-1)
-        
-        x = torch.cat((pm25_hist, temporal_tensor, topo_tensor), dim=-1)
-        return x
-
-test_dataset = TestDataLoader(cfg_infer, cfg_train, stats, topo_proxy)
+test_dataset = FastInMemoryDataset(cfg_train, split="test")
 test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
 pm_channels = cfg_train.data.time_input
 num_temporal_features = (len(cfg_train.features.met_variables) - 1) + len(cfg_train.features.derived_variables) + len(cfg_train.features.emission_variables)
@@ -132,7 +98,7 @@ for seed in SEEDS:
 
     current_idx = 0
     with torch.no_grad():
-        for x in tqdm(test_loader):
+        for x, _ in tqdm(test_loader):
             x = x.to(device, non_blocking=True)
             bs = x.size(0)
             
@@ -151,8 +117,26 @@ for seed in SEEDS:
 # Calculate the final ensemble average
 final_prediction = prediction_sum / len(SEEDS)
 
+# RMSE Calculation
+print("Calculating Test RMSE...")
+all_targets = []
+# Ensure pm parameters match shapes for denorm
+pm_iqr_np = stats['cpm25']['iqr'].reshape(cfg_train.data.S1, cfg_train.data.S2, 1)
+pm_median_np = stats['cpm25']['median'].reshape(cfg_train.data.S1, cfg_train.data.S2, 1)
+
+for i in range(len(test_dataset)):
+    _, y = test_dataset[i]
+    y_phys = (y.numpy() * pm_iqr_np) + pm_median_np
+    all_targets.append(y_phys)
+
+all_targets = np.stack(all_targets, axis=0)
+test_rmse = np.sqrt(np.mean((final_prediction - all_targets) ** 2))
+
 os.makedirs(cfg_infer.paths.output_loc, exist_ok=True)
 out_file = os.path.join(cfg_infer.paths.output_loc, 'preds.npy')
 
 np.save(out_file, final_prediction)
 print(f"\nSuccess! Final ensemble predictions saved to: {out_file}")
+print(f"=====================================")
+print(f"Final Ensemble Test RMSE: {test_rmse:.4f}")
+print(f"=====================================")

@@ -85,11 +85,12 @@ def process_month(month_name):
     topo_time = np.broadcast_to(topo_proxy[None, :, :], (total_hours, 140, 124))
     month_data.append(topo_time)
 
-    # 100% of the month goes to training
     combined = np.stack(month_data, axis=-1)
     return [combined]
 
 def build_dataset_and_indices(blocks, window_size, stride):
+    if len(blocks) == 0:
+        return np.array([]), np.array([], dtype=np.int32)
     concatenated, valid_starts, current_offset = [], [], 0
     for block in blocks:
         T = block.shape[0]
@@ -101,14 +102,39 @@ def build_dataset_and_indices(blocks, window_size, stride):
     return np.concatenate(concatenated, axis=0), np.array(valid_starts, dtype=np.int32)
 
 os.makedirs(cfg.paths.train_savepath, exist_ok=True)
+os.makedirs(cfg.paths.val_savepath, exist_ok=True)
+os.makedirs(cfg.paths.test_savepath, exist_ok=True)
 
-all_train_blocks = []
-print("Processing Data...")
+train_blocks, val_blocks, test_blocks = [], [], []
+
+val_frac = cfg.data.get('val_frac', 0.2)
+test_frac = cfg.data.get('test_frac', 0.1)
+train_frac = 1.0 - val_frac - test_frac
+
+print("Processing Data and splitting chronologically (Train/Val/Test)...")
 for month in tqdm(cfg.data.months):
-    all_train_blocks.extend(process_month(month))
+    blocks = process_month(month)
+    combined = blocks[0]
+    total_hours = combined.shape[0]
+    
+    train_end = int(train_frac * total_hours)
+    val_end = int((train_frac + val_frac) * total_hours)
+    
+    train_blocks.append(combined[:train_end])
+    val_blocks.append(combined[train_end:val_end])
+    test_blocks.append(combined[val_end:])
 
-final_train, train_indices = build_dataset_and_indices(all_train_blocks, cfg.data.horizon, cfg.data.stride)
+final_train, train_indices = build_dataset_and_indices(train_blocks, cfg.data.horizon, cfg.data.stride)
+final_val, val_indices = build_dataset_and_indices(val_blocks, cfg.data.horizon, cfg.data.stride)
+final_test, test_indices = build_dataset_and_indices(test_blocks, cfg.data.horizon, cfg.data.stride)
 
 np.save(os.path.join(cfg.paths.train_savepath, "train_data.npy"), final_train)
 np.save(os.path.join(cfg.paths.train_savepath, "train_indices.npy"), train_indices)
-print(f"Success! Final 100% Train shape: {final_train.shape}")
+
+np.save(os.path.join(cfg.paths.val_savepath, "val_data.npy"), final_val)
+np.save(os.path.join(cfg.paths.val_savepath, "val_indices.npy"), val_indices)
+
+np.save(os.path.join(cfg.paths.test_savepath, "test_data.npy"), final_test)
+np.save(os.path.join(cfg.paths.test_savepath, "test_indices.npy"), test_indices)
+
+print(f"Success! Train shape: {final_train.shape}, Val shape: {final_val.shape}, Test shape: {final_test.shape}")

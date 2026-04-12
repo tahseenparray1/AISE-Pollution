@@ -2,14 +2,16 @@ paths:
   raw_path: /kaggle/input/competitions/aisehack-theme-2/raw/
   train_savepath: /kaggle/temp/data/train/
   val_savepath: /kaggle/temp/data/val/
+  test_savepath: /kaggle/temp/data/test/
   topo_path: /kaggle/working/topo_proxy.npy
   stats_path: /kaggle/working/grid_robust_stats.npy
 
 data:
   months: ["APRIL_16", "JULY_16", "OCT_16", "DEC_16"]
   horizon: 26
-  stride: 4
+  stride: 16
   val_frac: 0.2
+  test_frac: 0.1
   seed: 0
 
 features:

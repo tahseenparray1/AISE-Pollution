@@ -12,6 +12,7 @@ from torch.optim.swa_utils import AveragedModel, SWALR
 cfg = load_config("configs/train.yaml")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.backends.cudnn.benchmark = True # Extremely fast for fixed input sizes on P100
 
 S1, S2 = cfg.data.S1, cfg.data.S2
 
@@ -35,11 +36,19 @@ horizon_weights = horizon_weights / horizon_weights.mean()
 horizon_weights = horizon_weights.view(1, 1, 1, -1)
 
 class FastInMemoryDataset(torch.utils.data.Dataset):
-    def __init__(self, cfg):
-        base_path = cfg.paths.savepath_train
-        print("Loading 100% Train Data into RAM...")
-        self.data = torch.from_numpy(np.load(os.path.join(base_path, "train_data.npy")).astype(np.float32))
-        self.valid_starts = np.load(os.path.join(base_path, "train_indices.npy"))
+    def __init__(self, cfg, split="train"):
+        if split == "train":
+            base_path = cfg.paths.savepath_train
+        elif split == "val":
+            base_path = cfg.paths.savepath_val
+        elif split == "test":
+            base_path = cfg.paths.savepath_test
+        else:
+            raise ValueError(f"Unknown split: {split}")
+            
+        print(f"Loading {split.capitalize()} Data into RAM...")
+        self.data = torch.from_numpy(np.load(os.path.join(base_path, f"{split}_data.npy")).astype(np.float32))
+        self.valid_starts = np.load(os.path.join(base_path, f"{split}_indices.npy"))
         
         self.time_in = cfg.data.time_input
         self.total_time = cfg.data.total_time
@@ -55,7 +64,7 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         start = self.valid_starts[idx]
-        window = self.data[start : start + self.total_time].clone() 
+        window = self.data[start : start + self.total_time] 
         
         pm_hist = window[:self.time_in, ..., self.target_idx].permute(1, 2, 0) 
         temporal_all = window[:, ..., self.temporal_idx]
@@ -66,8 +75,11 @@ class FastInMemoryDataset(torch.utils.data.Dataset):
         y = window[self.time_in:, ..., self.target_idx].permute(1, 2, 0)
         return x, y
 
-train_ds = FastInMemoryDataset(cfg)
-train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+train_ds = FastInMemoryDataset(cfg, split="train")
+train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, num_workers=1, pin_memory=True)
+
+val_ds = FastInMemoryDataset(cfg, split="val")
+val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, num_workers=1, pin_memory=True)
 
 pm_channels = cfg.data.time_input
 temporal_channels = len(train_ds.temporal_idx) * cfg.data.total_time
@@ -75,8 +87,7 @@ topo_channels = 1
 in_channels = pm_channels + temporal_channels + topo_channels
 
 # --- MULTI-SEED ENSEMBLE TRAINING LOOP ---
-# --- MULTI-SEED ENSEMBLE TRAINING LOOP ---
-SEEDS = [0, 42, 2026] # 3 models for ensembling
+SEEDS = [42] # Reduced to 1 seed for ultra-fast training (previously 3)
 
 for seed in SEEDS:
     print(f"\n{'='*40}")
@@ -96,6 +107,9 @@ for seed in SEEDS:
 
     optimizer = Adam(model.parameters(), lr=float(cfg.training.lr), weight_decay=float(cfg.training.weight_decay))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.training.epochs, eta_min=1e-6)
+    
+    # Initialize Mixed Precision Scaler for P100
+    scaler = torch.amp.GradScaler('cuda')
 
     swa_model = AveragedModel(model)
     swa_start = int(cfg.training.epochs * 0.576)
@@ -115,21 +129,34 @@ for seed in SEEDS:
             
             optimizer.zero_grad(set_to_none=True)
             
-            out = model(x)
-            pred_phys = to_physical(out)
-            targ_phys = to_physical(y)
-            
-            mse_loss = ((pred_phys - targ_phys) ** 2 * horizon_weights).mean()
-            loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
-            total_loss = mse_loss + 0.3228 * loss_grad
+            with torch.amp.autocast('cuda'):
+                out = model(x)
+                pred_phys = to_physical(out)
+                targ_phys = to_physical(y)
+                
+                mse_loss = ((pred_phys - targ_phys) ** 2 * horizon_weights).mean()
+                loss_grad = spatial_gradient_loss(pred_phys, targ_phys)
+                total_loss = mse_loss + 0.3228 * loss_grad
 
             with torch.no_grad():
                 pred_phys_clipped = F.relu(pred_phys.detach())
                 train_mse_acc += torch.mean((pred_phys_clipped - targ_phys) ** 2).item()
             
-            total_loss.backward()
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
+
+        model.eval()
+        val_mse_acc = 0.0
+        with torch.no_grad():
+            for vx, vy in val_loader:
+                vx, vy = vx.to(device), vy.to(device)
+                out = model(vx)
+                pred_phys = F.relu(to_physical(out))
+                targ_phys = to_physical(vy)
+                val_mse_acc += torch.mean((pred_phys - targ_phys) ** 2).item()
 
         if ep >= swa_start:
             swa_model.update_parameters(model)
@@ -138,8 +165,9 @@ for seed in SEEDS:
             scheduler.step()
 
         train_rmse = np.sqrt(train_mse_acc / len(train_loader))
+        val_rmse = np.sqrt(val_mse_acc / len(val_loader)) if len(val_loader) > 0 else 0.0
         duration = time.time() - t_start
-        print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f}")
+        print(f"Epoch {ep} | Time: {duration:.1f}s | Train RMSE: {train_rmse:.4f} | Val RMSE: {val_rmse:.4f}")
 
     # Save the final SWA model for this seed
     save_path = cfg.paths.model_save_path.replace(".pt", f"_seed{seed}.pt")
