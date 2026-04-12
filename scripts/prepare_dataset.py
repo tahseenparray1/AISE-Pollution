@@ -107,8 +107,8 @@ os.makedirs(cfg.paths.test_savepath, exist_ok=True)
 
 train_blocks, val_blocks, test_blocks = [], [], []
 
-val_frac = cfg.data.get('val_frac', 0.2)
-test_frac = cfg.data.get('test_frac', 0.1)
+val_frac = getattr(cfg.data, 'val_frac', 0.2)
+test_frac = getattr(cfg.data, 'test_frac', 0.1)
 train_frac = 1.0 - val_frac - test_frac
 
 print("Processing Data and splitting chronologically (Train/Val/Test)...")
